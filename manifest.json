@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "Class.com Lecture Downloader",
+  "version": "0.1.0",
+  "description": "Automatically saves Class.com shared-screen MP4 recordings when opened in the player.",
+  "permissions": ["webRequest", "downloads", "storage", "scripting"],
+  "host_permissions": [
+    "https://*.class.com/*"
+  ],
+  "background": { "service_worker": "dist/background.js", "type": "module" },
+  "action": { "default_title": "Class.com lecture downloader" }
+}

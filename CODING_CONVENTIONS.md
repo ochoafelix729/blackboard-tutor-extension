@@ -9,9 +9,10 @@
 2. **Use four spaces per indentation level.** Use actual spaces, **never tab characters**. Keep indentation consistent inside all blocks, objects, arrays, and multiline expressions.
 3. **Use curly braces for every control-flow body**, including single-line `if`, `else`, `for`, `while`, `do`, and other control-flow branches. Never omit braces as a shortcut.
 4. **Use Allman-style braces whenever JavaScript/TypeScript syntax permits:** put the opening `{` on its own line at the indentation level of the statement, with the closing `}` on its own line.
-5. **Use camelCase for all project-controlled identifiers**, including variables, constants, functions, parameters, properties, interfaces, types, classes, enums, and source filenames. Never introduce snake_case or SCREAMING_SNAKE_CASE identifiers. Names dictated by browser APIs, external services, existing third-party schemas, or required configuration formats are exceptions; translate them at the boundary when possible.
+5. **Use camelCase for project-controlled variables, constants, functions, parameters, properties, type aliases, and enums. Use PascalCase for classes and interfaces, including a source filename whose primary export is a class or interface.** Other source filenames use camelCase. Never introduce snake_case or SCREAMING_SNAKE_CASE identifiers. Names dictated by browser APIs, external services, existing third-party schemas, or required configuration formats are exceptions; translate them at the boundary when possible.
 6. **Keep function syntax consistent:** prefer named `function` declarations for reusable, standalone functions; use arrow functions for inline callbacks and functions intentionally passed as values; use method syntax for object and class methods.
 7. **Preserve correctness, type safety, and readability above stylistic uniformity** when a language feature cannot express the preferred layout.
+8. **Begin every source file with a short summary comment** describing the file's purpose. Generated files and file formats that do not support comments are exempt.
 
 ## 2. Indentation and whitespace
 
@@ -139,7 +140,7 @@ const readyLectures = lectures.filter((lecture) =>
 Use **method syntax** inside classes and object literals; do not arbitrarily alternate method declarations and function-valued properties.
 
 ```ts
-class lectureStore
+class LectureStore
 {
     async load(lectureId: string): Promise<void>
     {
@@ -165,9 +166,9 @@ const getLectureId = (url: URL): string | null =>
 
 Prefer explicit return types on exported functions, async functions, and public methods. Let TypeScript infer obvious local variable types.
 
-## 5. camelCase naming — everywhere under our control
+## 5. Identifier naming
 
-Use camelCase even for names that are customarily PascalCase or uppercase in other TypeScript codebases. **This is a deliberate project preference.**
+Use camelCase for ordinary project-controlled identifiers and PascalCase for project-controlled classes and interfaces. A source file whose primary export is a class or interface uses the same PascalCase name; other source filenames use camelCase. Type aliases and enums remain camelCase. **This is a deliberate project preference.**
 
 | Item | Required example | Avoid |
 |---|---|---|
@@ -176,14 +177,17 @@ Use camelCase even for names that are customarily PascalCase or uppercase in oth
 | Function | `processLecture` | `process_lecture` |
 | Parameter | `recordingUrl` | `recording_url` |
 | Property / method | `isReady`, `getStatus` | `is_ready`, `GetStatus` |
-| Interface / type alias | `lectureMetadata`, `processingStatus` | `LectureMetadata`, `processing_status` |
-| Class / enum | `lectureStore`, `jobStatus` | `LectureStore`, `JOB_STATUS` |
-| TS source filename | `lectureProcessor.ts` | `lecture_processor.ts` |
+| Interface | `LectureMetadata` | `lectureMetadata`, `lecture_metadata` |
+| Type alias | `processingStatus` | `ProcessingStatus`, `processing_status` |
+| Class | `LectureStore` | `lectureStore`, `lecture_store` |
+| Enum | `jobStatus` | `JobStatus`, `JOB_STATUS` |
+| Class-primary filename | `LectureProcessor.ts` | `lectureProcessor.ts`, `lecture_processor.ts` |
+| Function or mixed-module filename | `lectureDetector.ts` | `LectureDetector.ts`, `lecture_detector.ts` |
 
-For abbreviations, preserve natural camelCase: `apiClient`, `videoUrl`, `httpRequest`, `userId` rather than `APIClient`, `videoURL`, or `userID`.
+For abbreviations, preserve natural casing: use `apiClient`, `videoUrl`, `httpRequest`, and `userId` for camelCase identifiers, and `ApiClient` rather than `APIClient` for classes and interfaces.
 
 ```ts
-interface lectureMetadata
+interface LectureMetadata
 {
     lectureId: string;
     durationSeconds: number;
@@ -208,13 +212,13 @@ type providerResponse =
     duration_seconds: number;
 };
 
-interface lectureMetadata
+interface LectureMetadata
 {
     lectureId: string;
     durationSeconds: number;
 }
 
-function normalizeProviderResponse(source: providerResponse): lectureMetadata
+function normalizeProviderResponse(source: providerResponse): LectureMetadata
 {
     return {
         lectureId: source.lecture_id,
@@ -290,7 +294,7 @@ async function initializeLecture(lectureId: string): Promise<void>
 ## 9. File organization and maintainability
 
 - Prefer focused modules with one clear responsibility (lecture detection, media downloads, sidebar UI, message handling, transcript indexing, etc.).
-- Prefer camelCase TypeScript filenames such as `lectureDetector.ts`, `downloadManager.ts`, and `sidebarController.ts`.
+- Match class- and interface-primary filenames to the PascalCase primary export, such as `DownloadManager.ts` and `SidebarController.ts`. Use camelCase for function-primary or mixed modules, such as `lectureDetector.ts` and `protocol.ts`.
 - Keep interfaces/types near the domain code that owns them; extract shared types only when genuinely reused.
 - Do not add an abstraction, service, or new model integration simply because it may be useful later.
 - Preserve the extension's existing functionality when refactoring; add tests for new behavior where practicable.
@@ -301,10 +305,11 @@ async function initializeLecture(lectureId: string): Promise<void>
 Every contribution, whether written by a person or an AI assistant, should satisfy the following checklist:
 
 - [ ] New application code is TypeScript unless a documented constraint requires JavaScript.
+- [ ] Every source file begins with a short summary comment describing its purpose.
 - [ ] Indentation uses **four spaces**, with **zero tab characters**.
 - [ ] Every control-flow branch/body uses braces, including one-liners.
 - [ ] Block braces use **Allman style** where grammatically permitted.
-- [ ] All project-owned identifiers use camelCase, including types, classes, constants, and filenames.
+- [ ] Project-owned classes and interfaces use PascalCase, and class- or interface-primary filenames match that PascalCase export. Other project-owned identifiers and filenames use camelCase, including type aliases, enums, and constants.
 - [ ] Standalone reusable functions use named declarations; callbacks use arrow functions; object/class methods use method syntax.
 - [ ] External API naming exceptions are confined to integration boundaries.
 - [ ] TypeScript errors, lint failures, and related tests are addressed.
@@ -319,7 +324,7 @@ Suggested checks to configure and test before making them CI-blocking:
 
 - Four-space indentation and no hard tabs.
 - `curly: ['error', 'all']` for mandatory braces.
-- A naming-convention rule requiring camelCase for project-owned names, including `typeLike` constructs (with narrowly scoped external-format exceptions).
+- Naming-convention rules requiring PascalCase for project-owned classes, interfaces, and their primary filenames, and camelCase for other project-owned identifiers and filenames, with narrowly scoped external-format exceptions.
 - Rules discouraging function expressions for reusable function declarations, while allowing inline arrow callbacks.
 - TypeScript compiler in `noEmit` mode for type checking, plus lints and project tests.
 

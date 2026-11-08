@@ -40,24 +40,24 @@ This section documents **implemented code**, not planned functionality.
 
 | File/path | Present behavior |
 |---|---|
-| `manifest.json` | Manifest V3; service worker at `dist/background.js`; permissions include `webRequest`, `downloads`, `storage`, and `scripting`; host permission `https://*.class.com/*`. |
-| `background.ts` | Watches matching `webRequest.onBeforeRequest` events; checks for top-level requests initiated by `https://uark.class.com`; executes an injected function on the tab. |
-| Injected toolbar UI | Adds a `Download` button to `.ClassActionBar-measure` if absent. Its click handler **currently only logs** `Download clicked`; it does not download media. |
-| Injected sidebar UI | Adds a fixed 320px-wide `#tutor-sidebar` containing placeholder text and adjusts the HTML width. It is **not yet a chatbot**. |
-| `tsconfig.json` | Minimal TypeScript settings referencing Chrome types. |
-| `dist/background.js` | Compiled JavaScript output included in the archive. |
-| `logs/` | Local debugging captures; should not be treated as product assets or included in production packages. |
+| `manifest.json` | Manifest V3; registers a dedicated service worker and an all-frame content script on the existing `https://*.class.com/*` scope. Permissions are limited to `webRequest`, `downloads`, and `storage`. |
+| `src/background.ts`, `src/background/` | Observes supported Class.com MP4 requests, keeps signed URLs in ephemeral `chrome.storage.session`, restores state after service-worker suspension, orchestrates downloads, and relays cross-frame playback updates. |
+| `src/content.ts`, `src/content/` | Detects player surfaces, follows single-page navigation, selects the active media element, tracks playback time across supported frames, and owns the toolbar/sidebar DOM. |
+| `src/shared/lectureIdentity.ts` | Derives stable recording/session/meeting identities from page metadata and media paths, with a query-free page fallback. Signed URLs are never lecture identities. |
+| Download flow | Prefers the shared-screen MP4, uses `chrome.downloads`, sanitizes filenames, rejects links close to expiry, and reports starting, active, completed, expired, and failed states with recovery guidance. |
+| Tutor UI | Provides toolbar controls and an isolated Shadow DOM sidebar with lecture/media status, live playback time, timestamped question capture, timestamp seek links, and transparent Phase 1 messaging. The full-height sidebar is horizontally resizable and reserves bounded page width so the player expands and contracts with it. |
+| `tests/`, `package.json`, `tsconfig.json` | Strict TypeScript, pure identity/media tests, deterministic bundling, and a single `npm run check` verification command. |
+| `dist/` | Generated service-worker and content-script JavaScript referenced by the manifest. |
 
-**Important:** The repository currently has no transcript extractor, media ingestion pipeline, index, API server, authentication, chat backend, or model integration. The request listener is not yet a reliable implementation of lecture identity, signed media acquisition, or download authorization. The UI is injected by repeatedly handling network requests; this should be refactored as the extension matures.
+**Important:** The repository still has no transcript extractor, media ingestion pipeline, index, API server, authentication, chat backend, or model integration. The Phase 0 download path supports authorized MP4 assets that the Class.com player requests in the student's browser; it does not bypass access controls or consolidate adaptive streams.
 
-### Near-term frontend refactor
+### Phase 0 extension architecture
 
-- Move DOM and playback interactions to a dedicated **content script**, instead of injecting the whole UI through `chrome.scripting.executeScript` from every qualifying request.
-- Keep background/service-worker responsibilities focused on browser-level APIs, request observation, download orchestration, and messaging.
-- Use a component-based sidebar with isolated styles.
-- Avoid fragile global CSS such as shrinking `html` by a fixed amount if the host page changes layout; test resizing, fullscreen, and navigation.
-- Handle service-worker suspension/restart and player single-page navigation explicitly.
-- Avoid hardcoding `uark.class.com` in long-term product logic; validate the site and permitted origins without broadening host access unnecessarily.
+- DOM and playback interactions live in a dedicated content script; the service worker does not inject UI code.
+- The service worker is limited to browser APIs, request observation, ephemeral media state, download orchestration, and cross-frame messaging.
+- The sidebar uses isolated Shadow DOM styles plus one reversible page-layout class that reserves its current width. Resizing is bounded to preserve usable space for the lecture player, and closing the sidebar restores the full page width.
+- Service-worker suspension is handled with session storage, and content code detects player single-page navigation.
+- Product logic validates Class.com hosts without hardcoding the University of Arkansas tenant or broadening manifest access.
 
 ## 4. High-level architecture
 
@@ -263,6 +263,7 @@ Consider indexes on `(lecture_id, start_seconds, end_seconds)`, job idempotency 
 ## 11. Phased implementation plan
 
 ### Phase 0 — Strengthen extension skeleton
+- **Status: complete.**
 - Separate service worker from content script and UI.
 - Identify lecture ID and player playback time robustly.
 - Make Download functional on supported, authorized media; handle signed URL expiry and failures.

@@ -212,6 +212,120 @@
     }
   };
 
+  // src/shared/tutor.ts
+  function isRecord(value) {
+    return typeof value === "object" && value !== null;
+  }
+  function isTutorStrategy(value) {
+    return value === "transcriptOnly" || value === "multimodal";
+  }
+  function isFiniteNonnegativeNumber(value) {
+    return typeof value === "number" && Number.isFinite(value) && value >= 0;
+  }
+  function isStringArray(value) {
+    return Array.isArray(value) && value.every((item) => typeof item === "string");
+  }
+  function isTutorQuestion(value) {
+    if (!isRecord(value)) {
+      return false;
+    }
+    return typeof value.lectureId === "string" && value.lectureId.length > 0 && isFiniteNonnegativeNumber(value.timestampSeconds) && typeof value.question === "string" && value.question.trim().length > 0 && isTutorStrategy(value.strategy) && (value.currentFrameDataUrl === null || typeof value.currentFrameDataUrl === "string");
+  }
+  function isTutorCitation(value) {
+    if (!isRecord(value)) {
+      return false;
+    }
+    return isFiniteNonnegativeNumber(value.startSeconds) && isFiniteNonnegativeNumber(value.endSeconds) && value.endSeconds >= value.startSeconds && isStringArray(value.evidenceIds);
+  }
+  function isTutorCostSummary(value) {
+    if (!isRecord(value)) {
+      return false;
+    }
+    return typeof value.traceId === "string" && typeof value.provider === "string" && typeof value.model === "string" && isFiniteNonnegativeNumber(value.inputTokens) && isFiniteNonnegativeNumber(value.outputTokens) && (value.estimatedCostUsd === null || isFiniteNonnegativeNumber(value.estimatedCostUsd));
+  }
+  function isTutorAnswer(value) {
+    if (!isRecord(value)) {
+      return false;
+    }
+    return typeof value.answer === "string" && value.answer.length > 0 && Array.isArray(value.citations) && value.citations.every(isTutorCitation) && isStringArray(value.usedModalities) && isStringArray(value.limitations) && isTutorStrategy(value.strategy) && isTutorCostSummary(value.cost);
+  }
+
+  // src/background/TutorApiClient.ts
+  var tutorApiBaseUrl = "http://127.0.0.1:4387";
+  function isRecord2(value) {
+    return typeof value === "object" && value !== null;
+  }
+  function getApiError(value) {
+    if (!isRecord2(value) || !isRecord2(value.error) || typeof value.error.code !== "string" || typeof value.error.message !== "string") {
+      return null;
+    }
+    const supportedCodes = [
+      "invalidRequest",
+      "evidenceUnavailable",
+      "modelFailed",
+      "unexpectedError"
+    ];
+    if (!supportedCodes.includes(value.error.code)) {
+      return null;
+    }
+    return {
+      code: value.error.code,
+      message: value.error.message
+    };
+  }
+  var TutorApiClient = class {
+    async ask(question) {
+      let response;
+      try {
+        response = await fetch(`${tutorApiBaseUrl}/v1/questions`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Blackboard-Tutor": "1"
+          },
+          body: JSON.stringify(question),
+          signal: AbortSignal.timeout(1e5)
+        });
+      } catch {
+        return {
+          ok: false,
+          error: {
+            code: "tutorUnavailable",
+            message: "The local tutor API is not running. Start it with npm run phase1:server."
+          }
+        };
+      }
+      let responseBody;
+      try {
+        responseBody = await response.json();
+      } catch {
+        responseBody = null;
+      }
+      if (!response.ok) {
+        return {
+          ok: false,
+          error: getApiError(responseBody) ?? {
+            code: "unexpectedError",
+            message: "The local tutor API returned an unreadable error."
+          }
+        };
+      }
+      if (!isTutorAnswer(responseBody)) {
+        return {
+          ok: false,
+          error: {
+            code: "unexpectedError",
+            message: "The local tutor API returned an invalid answer."
+          }
+        };
+      }
+      return {
+        ok: true,
+        answer: responseBody
+      };
+    }
+  };
+
   // src/shared/lectureIdentity.ts
   function normalizeIdentifier(value) {
     const normalized = value.trim().toLowerCase();
@@ -365,21 +479,21 @@
   }
 
   // src/shared/protocol.ts
-  function isRecord(value) {
+  function isRecord3(value) {
     return typeof value === "object" && value !== null;
   }
   function isNullableString(value) {
     return typeof value === "string" || value === null;
   }
   function isPlaybackSnapshot(value) {
-    if (!isRecord(value)) {
+    if (!isRecord3(value)) {
       return false;
     }
     const hasValidDuration = value.duration === null || typeof value.duration === "number" && Number.isFinite(value.duration);
     return typeof value.currentTime === "number" && Number.isFinite(value.currentTime) && hasValidDuration && typeof value.isPaused === "boolean" && typeof value.hasVideo === "boolean" && typeof value.visibleArea === "number" && Number.isFinite(value.visibleArea) && typeof value.capturedAt === "number" && Number.isFinite(value.capturedAt);
   }
   function isContentRequest(value) {
-    if (!isRecord(value) || typeof value.kind !== "string") {
+    if (!isRecord3(value) || typeof value.kind !== "string") {
       return false;
     }
     switch (value.kind) {
@@ -398,6 +512,9 @@
       case "seekPlayback": {
         return typeof value.seconds === "number" && Number.isFinite(value.seconds);
       }
+      case "askTutor": {
+        return isTutorQuestion(value.question);
+      }
       default: {
         return false;
       }
@@ -407,6 +524,7 @@
   // src/background.ts
   var observedMediaStore = new MediaStore();
   var lectureDownloadManager = new DownloadManager();
+  var tutorApiClient = new TutorApiClient();
   var playbackByTab = /* @__PURE__ */ new Map();
   function createErrorResponse(code, message) {
     return {
@@ -553,6 +671,19 @@
           void chrome.runtime.lastError;
         });
         return { ok: true };
+      }
+      case "askTutor": {
+        const result = await tutorApiClient.ask(request.question);
+        if (!result.ok) {
+          return {
+            ok: false,
+            error: result.error
+          };
+        }
+        return {
+          ok: true,
+          data: result.answer
+        };
       }
     }
   }

@@ -1,5 +1,7 @@
 // Defines and validates messages shared between extension execution contexts.
 
+import { isTutorQuestion, type TutorQuestion } from "./tutor";
+
 export type mediaKind = "sharedScreen" | "speaker" | "gallery" | "recording";
 
 export interface MediaOption
@@ -32,7 +34,15 @@ export type downloadStatus = "starting" | "downloading" | "complete" | "failed";
 
 export interface ExtensionError
 {
-    code: "invalidRequest" | "mediaUnavailable" | "signedUrlExpired" | "downloadFailed" | "unexpectedError";
+    code:
+        | "invalidRequest"
+        | "mediaUnavailable"
+        | "signedUrlExpired"
+        | "downloadFailed"
+        | "tutorUnavailable"
+        | "evidenceUnavailable"
+        | "modelFailed"
+        | "unexpectedError";
     message: string;
 }
 
@@ -57,6 +67,10 @@ export type contentRequest =
     | {
         kind: "seekPlayback";
         seconds: number;
+    }
+    | {
+        kind: "askTutor";
+        question: TutorQuestion;
     };
 
 export type backgroundNotification =
@@ -146,6 +160,10 @@ export function isContentRequest(value: unknown): value is contentRequest
         case "seekPlayback":
         {
             return typeof value.seconds === "number" && Number.isFinite(value.seconds);
+        }
+        case "askTutor":
+        {
+            return isTutorQuestion(value.question);
         }
         default:
         {

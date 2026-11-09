@@ -1,7 +1,7 @@
 {
     "manifest_version": 3,
     "name": "Blackboard Lecture Tutor",
-    "version": "0.2.0",
+    "version": "0.3.0",
     "description": "Download authorized Class.com recordings and capture playback context for lecture tutoring.",
     "permissions": [
         "downloads",
@@ -9,7 +9,8 @@
         "webRequest"
     ],
     "host_permissions": [
-        "https://*.class.com/*"
+        "https://*.class.com/*",
+        "http://127.0.0.1:4387/*"
     ],
     "background": {
         "service_worker": "dist/background.js"

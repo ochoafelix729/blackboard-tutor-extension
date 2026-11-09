@@ -128,22 +128,54 @@
     return createPageIdentity(pageUrl);
   }
 
-  // src/shared/protocol.ts
+  // src/shared/tutor.ts
   function isRecord(value) {
+    return typeof value === "object" && value !== null;
+  }
+  function isTutorStrategy(value) {
+    return value === "transcriptOnly" || value === "multimodal";
+  }
+  function isFiniteNonnegativeNumber(value) {
+    return typeof value === "number" && Number.isFinite(value) && value >= 0;
+  }
+  function isStringArray(value) {
+    return Array.isArray(value) && value.every((item) => typeof item === "string");
+  }
+  function isTutorCitation(value) {
+    if (!isRecord(value)) {
+      return false;
+    }
+    return isFiniteNonnegativeNumber(value.startSeconds) && isFiniteNonnegativeNumber(value.endSeconds) && value.endSeconds >= value.startSeconds && isStringArray(value.evidenceIds);
+  }
+  function isTutorCostSummary(value) {
+    if (!isRecord(value)) {
+      return false;
+    }
+    return typeof value.traceId === "string" && typeof value.provider === "string" && typeof value.model === "string" && isFiniteNonnegativeNumber(value.inputTokens) && isFiniteNonnegativeNumber(value.outputTokens) && (value.estimatedCostUsd === null || isFiniteNonnegativeNumber(value.estimatedCostUsd));
+  }
+  function isTutorAnswer(value) {
+    if (!isRecord(value)) {
+      return false;
+    }
+    return typeof value.answer === "string" && value.answer.length > 0 && Array.isArray(value.citations) && value.citations.every(isTutorCitation) && isStringArray(value.usedModalities) && isStringArray(value.limitations) && isTutorStrategy(value.strategy) && isTutorCostSummary(value.cost);
+  }
+
+  // src/shared/protocol.ts
+  function isRecord2(value) {
     return typeof value === "object" && value !== null;
   }
   function isNullableString(value) {
     return typeof value === "string" || value === null;
   }
   function isPlaybackSnapshot(value) {
-    if (!isRecord(value)) {
+    if (!isRecord2(value)) {
       return false;
     }
     const hasValidDuration = value.duration === null || typeof value.duration === "number" && Number.isFinite(value.duration);
     return typeof value.currentTime === "number" && Number.isFinite(value.currentTime) && hasValidDuration && typeof value.isPaused === "boolean" && typeof value.hasVideo === "boolean" && typeof value.visibleArea === "number" && Number.isFinite(value.visibleArea) && typeof value.capturedAt === "number" && Number.isFinite(value.capturedAt);
   }
   function isBackgroundNotification(value) {
-    if (!isRecord(value) || typeof value.kind !== "string") {
+    if (!isRecord2(value) || typeof value.kind !== "string") {
       return false;
     }
     switch (value.kind) {
@@ -166,20 +198,20 @@
     }
   }
   function isBackgroundResponse(value) {
-    if (!isRecord(value) || typeof value.ok !== "boolean") {
+    if (!isRecord2(value) || typeof value.ok !== "boolean") {
       return false;
     }
     if (value.ok) {
       return true;
     }
-    return isRecord(value.error) && typeof value.error.code === "string" && typeof value.error.message === "string";
+    return isRecord2(value.error) && typeof value.error.code === "string" && typeof value.error.message === "string";
   }
   function isLectureState(value) {
-    if (!isRecord(value) || !isNullableString(value.lectureId) || !Array.isArray(value.mediaOptions)) {
+    if (!isRecord2(value) || !isNullableString(value.lectureId) || !Array.isArray(value.mediaOptions)) {
       return false;
     }
     return typeof value.canDownload === "boolean" && value.mediaOptions.every((option) => {
-      return isRecord(option) && typeof option.assetKey === "string" && typeof option.kind === "string" && typeof option.label === "string" && (option.expiresAt === null || typeof option.expiresAt === "number") && typeof option.isExpired === "boolean";
+      return isRecord2(option) && typeof option.assetKey === "string" && typeof option.kind === "string" && typeof option.label === "string" && (option.expiresAt === null || typeof option.expiresAt === "number") && typeof option.isExpired === "boolean";
     });
   }
 
@@ -236,6 +268,27 @@
       this.capture();
       return true;
     }
+    captureCurrentFrame() {
+      const mediaElement = getBestMediaElement();
+      if (!(mediaElement instanceof HTMLVideoElement) || mediaElement.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || mediaElement.videoWidth <= 0 || mediaElement.videoHeight <= 0) {
+        return null;
+      }
+      const maximumWidth = 960;
+      const scale = Math.min(1, maximumWidth / mediaElement.videoWidth);
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(mediaElement.videoWidth * scale));
+      canvas.height = Math.max(1, Math.round(mediaElement.videoHeight * scale));
+      const context = canvas.getContext("2d");
+      if (context === null) {
+        return null;
+      }
+      try {
+        context.drawImage(mediaElement, 0, 0, canvas.width, canvas.height);
+        return canvas.toDataURL("image/jpeg", 0.72);
+      } catch {
+        return null;
+      }
+    }
     capture() {
       const mediaElement = getBestMediaElement();
       if (mediaElement !== null) {
@@ -286,6 +339,7 @@
         }
 
         button,
+        select,
         textarea {
             font: inherit;
         }
@@ -443,6 +497,22 @@
             white-space: nowrap;
         }
 
+        .lecture-id {
+            min-width: 0;
+            max-width: 100%;
+            padding: 0;
+            overflow: hidden;
+            color: #68748a;
+            background: transparent;
+            border: 0;
+            cursor: copy;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-size: 10px;
+            text-align: left;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
         .download {
             flex: none;
             padding: 7px 10px;
@@ -495,8 +565,8 @@
         }
 
         .timestamp {
-            display: block;
-            margin-top: 7px;
+            display: inline-block;
+            margin: 7px 8px 0 0;
             padding: 0;
             color: inherit;
             background: transparent;
@@ -556,6 +626,61 @@
             font-weight: 700;
         }
 
+        .ask:disabled {
+            cursor: not-allowed;
+            opacity: 0.65;
+        }
+
+        textarea:disabled,
+        select:disabled {
+            cursor: wait;
+            opacity: 0.65;
+        }
+
+        .strategy {
+            max-width: 170px;
+            padding: 6px 8px;
+            color: #263247;
+            background: #ffffff;
+            border: 1px solid #cbd2df;
+            border-radius: 7px;
+            font-size: 11px;
+        }
+
+        .consent {
+            display: flex;
+            align-items: flex-start;
+            gap: 7px;
+            margin-top: 9px;
+            color: #596579;
+            font-size: 10px;
+            line-height: 1.35;
+        }
+
+        .consent input {
+            flex: none;
+            margin: 2px 0 0;
+        }
+
+        .answer-text,
+        .limitations,
+        .trace {
+            margin: 0;
+        }
+
+        .limitations {
+            margin-top: 8px;
+            color: #596579;
+            font-size: 11px;
+        }
+
+        .trace {
+            margin-top: 8px;
+            color: #68748a;
+            font-size: 10px;
+            font-variant-numeric: tabular-nums;
+        }
+
     </style>
     <button class="launcher" type="button" aria-label="Open lecture tutor" hidden>Tutor</button>
     <aside class="panel" aria-label="Lecture tutor">
@@ -582,13 +707,33 @@
             <div class="context-row">
                 <span class="media-status">Waiting for authorized media\u2026</span>
             </div>
+            <div class="context-row">
+                <input
+                    class="lecture-id"
+                    type="text"
+                    value="Lecture ID pending"
+                    aria-label="Stable lecture ID"
+                    title="Select and copy the stable lecture ID"
+                    readonly
+                >
+            </div>
         </section>
         <div class="messages" role="log" aria-live="polite"></div>
         <form class="composer">
             <textarea aria-label="Ask about this lecture" placeholder="Ask about what the professor is explaining\u2026" required></textarea>
+            <label class="consent">
+                <input type="checkbox" class="consent-input">
+                <span>Send retrieved lecture evidence\u2014including frames when selected\u2014to the configured AI provider.</span>
+            </label>
             <div class="composer-row">
-                <span class="hint">Your playback time is attached</span>
+                <select class="strategy" aria-label="Tutor evidence strategy">
+                    <option value="transcriptOnly">Transcript only</option>
+                    <option value="multimodal">Transcript + visuals</option>
+                </select>
                 <button class="ask" type="submit">Ask</button>
+            </div>
+            <div class="composer-row">
+                <span class="hint">Playback time and estimated API cost are attached</span>
             </div>
         </form>
     </aside>
@@ -639,14 +784,19 @@
     lectureTitle;
     time;
     mediaStatus;
+    lectureId;
     downloadButton;
     messages;
     form;
     textarea;
+    strategy;
+    askButton;
+    consentInput;
     playback = null;
     isOpen = true;
     sidebarWidth = getDefaultSidebarWidth(window.innerWidth);
     activeResizePointerId = null;
+    isTutorBusy = false;
     resizeStartX = 0;
     resizeStartWidth = 0;
     constructor(callbacks) {
@@ -661,10 +811,14 @@
       this.lectureTitle = requireElement(shadowRoot, ".lecture-title");
       this.time = requireElement(shadowRoot, ".time");
       this.mediaStatus = requireElement(shadowRoot, ".media-status");
+      this.lectureId = requireElement(shadowRoot, ".lecture-id");
       this.downloadButton = requireElement(shadowRoot, ".download");
       this.messages = requireElement(shadowRoot, ".messages");
       this.form = requireElement(shadowRoot, ".composer");
       this.textarea = requireElement(shadowRoot, "textarea");
+      this.strategy = requireElement(shadowRoot, ".strategy");
+      this.askButton = requireElement(shadowRoot, ".ask");
+      this.consentInput = requireElement(shadowRoot, ".consent-input");
       requireElement(shadowRoot, ".close").addEventListener("click", () => {
         this.setOpen(false);
       });
@@ -674,9 +828,27 @@
       this.downloadButton.addEventListener("click", () => {
         this.callbacks.onDownload();
       });
+      this.lectureId.addEventListener("click", () => {
+        const lectureId = this.lectureId.value;
+        this.lectureId.select();
+        if (this.lectureId.dataset.isAvailable === "true" && navigator.clipboard !== void 0) {
+          void navigator.clipboard.writeText(lectureId).then(() => {
+            this.lectureId.value = "Lecture ID copied";
+            window.setTimeout(() => {
+              this.lectureId.value = lectureId;
+              this.lectureId.select();
+            }, 1200);
+          }).catch(() => {
+            this.lectureId.title = "Clipboard permission was denied";
+          });
+        }
+      });
       this.form.addEventListener("submit", (event) => {
         event.preventDefault();
         this.submitQuestion();
+      });
+      this.consentInput.addEventListener("change", () => {
+        this.updateAskAvailability();
       });
       this.textarea.addEventListener("keydown", (event) => {
         if (event.key === "Enter" && !event.shiftKey) {
@@ -711,6 +883,7 @@
       document.documentElement.append(this.host);
       installPageLayoutStyle();
       this.applySidebarWidth(this.sidebarWidth);
+      this.updateAskAvailability();
       this.addMessage(
         "assistant",
         "I\u2019m tracking the lecture\u2019s playback position. Ask a question to capture it with the current timestamp."
@@ -730,6 +903,14 @@
       this.time.title = playback.isPaused ? "Lecture paused" : "Lecture playing";
     }
     setLectureState(state) {
+      const lectureId = state.lectureId ?? "Lecture ID unavailable";
+      this.lectureId.value = lectureId;
+      this.lectureId.title = state.lectureId === null ? "A stable lecture ID has not been detected" : "Copy the stable lecture ID";
+      if (state.lectureId === null) {
+        delete this.lectureId.dataset.isAvailable;
+      } else {
+        this.lectureId.dataset.isAvailable = "true";
+      }
       this.downloadButton.disabled = !state.canDownload;
       if (state.canDownload) {
         const preferredLabel = state.mediaOptions.find((option) => !option.isExpired)?.label;
@@ -764,6 +945,51 @@
       }
       this.messages.append(message);
       this.messages.scrollTop = this.messages.scrollHeight;
+    }
+    addTutorAnswer(answer) {
+      const message = document.createElement("div");
+      message.className = "message assistant";
+      const answerText = document.createElement("p");
+      answerText.className = "answer-text";
+      answerText.textContent = answer.answer;
+      message.append(answerText);
+      for (const citation of answer.citations) {
+        const timestamp = document.createElement("button");
+        timestamp.type = "button";
+        timestamp.className = "timestamp";
+        timestamp.textContent = `Jump to ${formatTime(citation.startSeconds)}`;
+        timestamp.title = `Evidence: ${citation.evidenceIds.join(", ")}`;
+        timestamp.addEventListener("click", () => {
+          this.callbacks.onSeek(citation.startSeconds);
+        });
+        message.append(timestamp);
+      }
+      if (answer.limitations.length > 0) {
+        const limitations = document.createElement("p");
+        limitations.className = "limitations";
+        limitations.textContent = `Limitations: ${answer.limitations.join(" ")}`;
+        message.append(limitations);
+      }
+      const trace = document.createElement("p");
+      trace.className = "trace";
+      const cost = answer.cost.estimatedCostUsd === null ? "cost unpriced" : `est. $${answer.cost.estimatedCostUsd.toFixed(6)}`;
+      trace.textContent = [
+        answer.cost.model,
+        `${answer.cost.inputTokens} in / ${answer.cost.outputTokens} out`,
+        cost,
+        `trace ${answer.cost.traceId.slice(0, 8)}`
+      ].join(" \xB7 ");
+      message.append(trace);
+      this.messages.append(message);
+      this.messages.scrollTop = this.messages.scrollHeight;
+    }
+    setTutorBusy(isBusy) {
+      this.isTutorBusy = isBusy;
+      this.textarea.disabled = isBusy;
+      this.strategy.disabled = isBusy;
+      this.consentInput.disabled = isBusy;
+      this.askButton.textContent = isBusy ? "Thinking\u2026" : "Ask";
+      this.updateAskAvailability();
     }
     setOpen(isOpen) {
       this.isOpen = isOpen;
@@ -848,11 +1074,16 @@
     }
     submitQuestion() {
       const question = this.textarea.value.trim();
-      if (question.length === 0) {
+      if (question.length === 0 || !this.consentInput.checked || this.isTutorBusy) {
         return;
       }
       this.textarea.value = "";
-      this.callbacks.onQuestion(question, this.playback);
+      const strategy = this.strategy.value === "transcriptOnly" ? "transcriptOnly" : "multimodal";
+      this.callbacks.onQuestion(question, this.playback, strategy);
+    }
+    updateAskAvailability() {
+      this.askButton.disabled = this.isTutorBusy || !this.consentInput.checked;
+      this.askButton.title = this.consentInput.checked ? "Ask about the current lecture moment" : "Confirm evidence sharing before asking";
     }
   };
 
@@ -996,8 +1227,8 @@
         onDownload: () => {
           void this.startDownload();
         },
-        onQuestion: (question, playback) => {
-          this.captureQuestion(question, playback);
+        onQuestion: (question, playback, strategy) => {
+          void this.askQuestion(question, playback, strategy);
         },
         onSeek: (seconds) => {
           this.seek(seconds);
@@ -1095,15 +1326,50 @@
         await this.refreshLectureState();
       }
     }
-    captureQuestion(question, playback) {
+    async askQuestion(question, playback, strategy) {
       const timestamp = playback?.currentTime ?? this.latestPlayback?.currentTime;
       this.sidebar.addMessage("user", question, timestamp);
-      const contextDescription = timestamp === void 0 ? "I saved your question, but no player timestamp is available yet." : "I saved your question with the current playback time.";
-      this.sidebar.addMessage(
-        "assistant",
-        `${contextDescription} Grounded lecture answers will be connected in Phase 1.`,
-        timestamp
-      );
+      if (timestamp === void 0) {
+        this.sidebar.addMessage(
+          "assistant",
+          "Start or pause the lecture so I can attach a playback timestamp, then ask again."
+        );
+        return;
+      }
+      if (this.lectureState.lectureId === null) {
+        this.sidebar.addMessage(
+          "assistant",
+          "I could not identify this lecture yet. Start playback or reload the recording, then ask again."
+        );
+        return;
+      }
+      this.sidebar.setTutorBusy(true);
+      try {
+        const response = await sendRequest({
+          kind: "askTutor",
+          question: {
+            lectureId: this.lectureState.lectureId,
+            timestampSeconds: timestamp,
+            question,
+            strategy,
+            currentFrameDataUrl: strategy === "multimodal" ? this.tracker.captureCurrentFrame() : null
+          }
+        });
+        if (!response.ok) {
+          this.sidebar.addMessage("assistant", response.error.message);
+          return;
+        }
+        if (!isTutorAnswer(response.data)) {
+          this.sidebar.addMessage(
+            "assistant",
+            "The tutor returned an invalid answer. Check the local API and try again."
+          );
+          return;
+        }
+        this.sidebar.addTutorAnswer(response.data);
+      } finally {
+        this.sidebar.setTutorBusy(false);
+      }
     }
     seek(seconds) {
       const didSeekLocally = this.tracker.seek(seconds);

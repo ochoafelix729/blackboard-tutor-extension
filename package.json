@@ -1,0 +1,19 @@
+{
+    "name": "blackboard-tutor-extension",
+    "version": "0.2.0",
+    "private": true,
+    "description": "A Class.com lecture downloader and context-aware tutoring extension.",
+    "scripts": {
+        "build": "esbuild src/background.ts src/content.ts --bundle --outdir=dist --format=iife --platform=browser --target=chrome120",
+        "check": "npm run typecheck && npm test && npm run build",
+        "test": "tsx --test tests/*.test.ts",
+        "typecheck": "tsc --noEmit --pretty false"
+    },
+    "devDependencies": {
+        "@types/chrome": "^0.1.31",
+        "@types/node": "^24.10.0",
+        "esbuild": "^0.28.2",
+        "tsx": "^4.20.6",
+        "typescript": "^5.9.3"
+    }
+}

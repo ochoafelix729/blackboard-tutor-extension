@@ -45,11 +45,13 @@ This section documents **implemented code**, not planned functionality.
 | `src/content.ts`, `src/content/` | Detects player surfaces, follows single-page navigation, selects the active media element, tracks playback time across supported frames, and owns the toolbar/sidebar DOM. |
 | `src/shared/lectureIdentity.ts` | Derives stable recording/session/meeting identities from page metadata and media paths, with a query-free page fallback. Signed URLs are never lecture identities. |
 | Download flow | Prefers the shared-screen MP4, uses `chrome.downloads`, sanitizes filenames, rejects links close to expiry, and reports starting, active, completed, expired, and failed states with recovery guidance. |
-| Tutor UI | Provides toolbar controls and an isolated Shadow DOM sidebar with lecture/media status, live playback time, timestamped question capture, timestamp seek links, and transparent Phase 1 messaging. The full-height sidebar is horizontally resizable and reserves bounded page width so the player expands and contracts with it. |
+| Tutor UI | Provides toolbar controls and an isolated Shadow DOM sidebar with lecture/media status, live playback time, a copyable lecture ID, explicit evidence-sharing consent, transcript-only versus multimodal strategy selection, grounded answers, timestamp seek links, and per-answer model/token/cost traces. The full-height sidebar is horizontally resizable and reserves bounded page width so the player expands and contracts with it. |
+| `server/` | Runs the local Phase 1 HTTP API, retrieves already-watched transcript/frame evidence, calls a replaceable model-provider interface, validates returned citations, and appends privacy-conscious cost traces. |
+| `scripts/`, `phase1-data/` | Prepares a private experiment from an ASR WebVTT transcript and authorized MP4 using deterministic FFmpeg scene selection. Generated lecture evidence is ignored by Git. |
 | `tests/`, `package.json`, `tsconfig.json` | Strict TypeScript, pure identity/media tests, deterministic bundling, and a single `npm run check` verification command. |
 | `dist/` | Generated service-worker and content-script JavaScript referenced by the manifest. |
 
-**Important:** The repository still has no transcript extractor, media ingestion pipeline, index, API server, authentication, chat backend, or model integration. The Phase 0 download path supports authorized MP4 assets that the Class.com player requests in the student's browser; it does not bypass access controls or consolidate adaptive streams.
+**Important:** Phase 1 is a local single-lecture experiment, not the durable Phase 2 ingestion system. It expects an externally generated ASR WebVTT transcript and a user-authorized MP4, has no authentication or cloud job system, and retrieves directly from private local evidence. The download path supports authorized MP4 assets that the Class.com player requests in the student's browser; it does not bypass access controls or consolidate adaptive streams.
 
 ### Phase 0 extension architecture
 
@@ -270,6 +272,7 @@ Consider indexes on `(lecture_id, start_seconds, end_seconds)`, job idempotency 
 - Replace sidebar placeholder with a working interactive UI.
 
 ### Phase 1 — End-to-end contextual tutor experiment
+- **Status: complete as a local experiment.** A provider key and private lecture evidence are required for a live run and are intentionally not committed.
 - Test one accessible lecture with an ASR transcript and representative slide frames.
 - Build a minimal chat path that uses current timestamp + extracted evidence.
 - Compare a transcript-only model with a model receiving both transcript and visuals.

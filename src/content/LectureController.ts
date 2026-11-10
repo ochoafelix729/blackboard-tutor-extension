@@ -137,11 +137,11 @@ export class LectureController
         window.setInterval(() =>
         {
             this.checkForNavigation();
-        }, 1_000);
+        }, 1000);
         window.setInterval(() =>
         {
             void this.refreshLectureState();
-        }, 5_000);
+        }, 5000);
     }
 
     private installMessageListener(): void
@@ -192,7 +192,7 @@ export class LectureController
             || (playback.hasVideo && !this.latestPlayback.hasVideo)
             || (!playback.isPaused && this.latestPlayback.isPaused)
             || playback.visibleArea >= this.latestPlayback.visibleArea
-            || playback.capturedAt - this.latestPlayback.capturedAt > 2_000;
+            || playback.capturedAt - this.latestPlayback.capturedAt > 2000;
 
         if (!shouldUsePlayback)
         {
@@ -202,7 +202,7 @@ export class LectureController
         this.latestPlayback = playback;
         this.sidebar.setPlayback(playback);
 
-        if (shouldReport && playback.capturedAt - this.lastPlaybackReportAt >= 1_000)
+        if (shouldReport && playback.capturedAt - this.lastPlaybackReportAt >= 1000)
         {
             this.lastPlaybackReportAt = playback.capturedAt;
             void sendRequest({

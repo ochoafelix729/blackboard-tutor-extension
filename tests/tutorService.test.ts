@@ -35,7 +35,7 @@ class FakeModelProvider implements ModelProvider
                 limitations: []
             },
             usage: {
-                inputTokens: 1_000,
+                inputTokens: 1000,
                 cachedInputTokens: 0,
                 cacheWriteTokens: 0,
                 outputTokens: 100,

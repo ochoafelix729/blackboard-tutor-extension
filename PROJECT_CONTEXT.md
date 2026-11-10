@@ -38,20 +38,22 @@ A student pauses an abstract linear algebra lecture at 24:30 and asks, "Why does
 
 This section documents **implemented code**, not planned functionality.
 
+**Draft status:** The current Phase 2 ingestion and playback-aware tutoring implementation is a rough functional draft. Phase 4 will revisit and improve its architecture, retrieval quality, user experience, and production readiness.
+
 | File/path | Present behavior |
 |---|---|
 | `manifest.json` | Manifest V3; registers a dedicated service worker and an all-frame content script on the existing `https://*.class.com/*` scope. Permissions are limited to `webRequest`, `downloads`, and `storage`. |
-| `src/background.ts`, `src/background/` | Observes supported Class.com MP4 requests, keeps signed URLs in ephemeral `chrome.storage.session`, restores state after service-worker suspension, orchestrates downloads, and relays cross-frame playback updates. |
+| `src/background.ts`, `src/background/` | Observes supported Class.com MP4 requests, keeps signed URLs in ephemeral `chrome.storage.session`, restores state after service-worker suspension, automatically initiates local ingestion on the first consented question, orchestrates downloads, and relays cross-frame playback updates. |
 | `src/content.ts`, `src/content/` | Detects player surfaces, follows single-page navigation, selects the active media element, tracks playback time across supported frames, and owns the toolbar/sidebar DOM. |
 | `src/shared/lectureIdentity.ts` | Derives stable recording/session/meeting identities from page metadata and media paths, with a query-free page fallback. Signed URLs are never lecture identities. |
 | Download flow | Prefers the shared-screen MP4, uses `chrome.downloads`, sanitizes filenames, rejects links close to expiry, and reports starting, active, completed, expired, and failed states with recovery guidance. |
-| Tutor UI | Provides toolbar controls and an isolated Shadow DOM sidebar with lecture/media status, live playback time, a copyable lecture ID, explicit evidence-sharing consent, transcript-only versus multimodal strategy selection, grounded answers, timestamp seek links, and per-answer model/token/cost traces. The full-height sidebar is horizontally resizable and reserves bounded page width so the player expands and contracts with it. |
-| `server/` | Runs the local Phase 1 HTTP API, retrieves already-watched transcript/frame evidence, calls a replaceable model-provider interface, validates returned citations, and appends privacy-conscious cost traces. |
-| `scripts/`, `phase1-data/` | Prepares a private experiment from an ASR WebVTT transcript and authorized MP4 using deterministic FFmpeg scene selection. Generated lecture evidence is ignored by Git. |
+| Tutor UI | Provides toolbar controls and an isolated Shadow DOM sidebar with lecture/media and Phase 2 processing status, live playback time, a copyable lecture ID, explicit evidence-sharing consent, transcript-only versus multimodal strategy selection, grounded answers, timestamp seek links, and per-answer model/token/cost traces. Questions are limited to the current moment and preceding 10 minutes; full-lecture requests are redirected to the recording download workflow. The full-height sidebar is horizontally resizable and reserves bounded page width so the player expands and contracts with it. |
+| `server/` | Runs the local Phase 2 HTTP API, acquires the authorized recording from the extension on the first consented question, creates timestamped ASR transcript evidence when captions are not supplied, persists lecture/job/artifact records, retrieves already-watched evidence with temporal/lexical/semantic ranking, validates returned citations, and appends privacy-conscious cost traces. |
+| `phase2-data/` | The ignored private Phase 2 store contains an atomic registry plus versioned metadata, transcript, scene-frame, segment, and embedding artifacts. Managed source media is deleted after successful ingestion. |
 | `tests/`, `package.json`, `tsconfig.json` | Strict TypeScript, pure identity/media tests, deterministic bundling, and a single `npm run check` verification command. |
 | `dist/` | Generated service-worker and content-script JavaScript referenced by the manifest. |
 
-**Important:** Phase 1 is a local single-lecture experiment, not the durable Phase 2 ingestion system. It expects an externally generated ASR WebVTT transcript and a user-authorized MP4, has no authentication or cloud job system, and retrieves directly from private local evidence. The download path supports authorized MP4 assets that the Class.com player requests in the student's browser; it does not bypass access controls or consolidate adaptive streams.
+**Important:** Phase 2 is a durable local implementation, not a deployed multi-user cloud system. On the first consented question, it acquires the user-authorized MP4 that the extension observed and sends bounded audio chunks to the configured ASR provider when a timestamped transcript is needed. Signed URLs are sent only to the local API and never to a model provider, page context, or logs. It has bounded local job leases/retries but no authentication, remote worker fleet, or shared cross-user index. The download path supports authorized MP4 assets that the Class.com player requests in the student's browser; it does not bypass access controls or consolidate adaptive streams.
 
 ### Phase 0 extension architecture
 
@@ -190,8 +192,8 @@ At each user message, send only the information necessary to ground the question
 ### Suggested request flow
 
 1. Classify question intent with cheap rules first; use a lightweight classifier only if needed.
-2. Retrieve nearby timestamp evidence for deictic questions ("this", "here", "what he just said").
-3. Retrieve lexical/semantic segments for broader questions ("when does he explain X?").
+2. Reject full-lecture analysis, explicit references more than 10 minutes back, and vague lecture-wide references that cannot fit inside the recent context window.
+3. Retrieve nearby timestamp evidence for deictic questions ("this", "here", "what he just said") and lexical/semantic evidence from at most the preceding 10 minutes.
 4. Rerank and assemble concise context, with transcript snippets, slide descriptions, images, and equations as available.
 5. Route to a capable text/reasoning or multimodal model based on the **evidence needed**; avoid invoking every model on every question.
 6. Stream the response to the sidebar, including relevant timestamps, confidence/uncertainty, and evidence references.
@@ -279,6 +281,7 @@ Consider indexes on `(lecture_id, start_seconds, end_seconds)`, job idempotency 
 - Add timestamp links and inspect actual answer quality on technical lectures.
 
 ### Phase 2 — Durable ingestion and retrieval
+- **Status: complete as a durable local implementation.** Cloud authentication, remote media transfer, and multi-user workers remain later deployment work.
 - Add lecture/job/artifact records and persistent storage.
 - Add transcript timestamps, slide-change detection, semantic segments, and baseline embeddings.
 - Support partial readiness, retries, and reuse without duplicate jobs.

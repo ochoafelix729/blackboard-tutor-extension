@@ -2,7 +2,9 @@
 
 export type tutorServiceErrorCode =
     | "invalidRequest"
+    | "questionOutOfScope"
     | "evidenceUnavailable"
+    | "lectureProcessing"
     | "modelFailed"
     | "unexpectedError";
 

@@ -4,6 +4,7 @@ import { DownloadManager } from "./background/DownloadManager";
 import { MediaStore } from "./background/MediaStore";
 import { TutorApiClient } from "./background/TutorApiClient";
 import { isMediaExpired, parseObservedMedia, selectPreferredMedia } from "./shared/media";
+import { evaluateQuestionScope } from "./shared/questionScope";
 import {
     isContentRequest,
     type backgroundNotification,
@@ -189,6 +190,40 @@ async function startDownload(
     }
 }
 
+async function registerTutorLecture(
+    tabId: number,
+    documentId: string | null,
+    request: Extract<contentRequest, { kind: "askTutor" }>
+): Promise<backgroundResponse>
+{
+    const mediaCandidates = await observedMediaStore.getForTab(tabId, documentId);
+    const selectedMedia = selectPreferredMedia(mediaCandidates, request.question.lectureId);
+
+    if (selectedMedia === null)
+    {
+        return createErrorResponse(
+            "mediaUnavailable",
+            "Start lecture playback so its authorized recording can be processed automatically."
+        );
+    }
+
+    const result = await tutorApiClient.registerLecture(
+        request.question.lectureId,
+        request.lectureTitle,
+        selectedMedia.url
+    );
+
+    if (!result.ok)
+    {
+        return {
+            ok: false,
+            error: result.error
+        };
+    }
+
+    return { ok: true };
+}
+
 function relayPlayback(tabId: number, frameId: number, playback: PlaybackSnapshot): void
 {
     const previous = playbackByTab.get(tabId);
@@ -265,6 +300,23 @@ async function handleContentRequest(
         }
         case "askTutor":
         {
+            const scopeDecision = evaluateQuestionScope(
+                request.question.question,
+                request.question.timestampSeconds
+            );
+
+            if (!scopeDecision.isAllowed)
+            {
+                return createErrorResponse("questionOutOfScope", scopeDecision.message);
+            }
+
+            const registration = await registerTutorLecture(tabId, documentId, request);
+
+            if (!registration.ok)
+            {
+                return registration;
+            }
+
             const result = await tutorApiClient.ask(request.question);
 
             if (!result.ok)
@@ -278,6 +330,23 @@ async function handleContentRequest(
             return {
                 ok: true,
                 data: result.answer
+            };
+        }
+        case "getTutorStatus":
+        {
+            const result = await tutorApiClient.getStatus(request.lectureId);
+
+            if (!result.ok)
+            {
+                return {
+                    ok: false,
+                    error: result.error
+                };
+            }
+
+            return {
+                ok: true,
+                data: result.status
             };
         }
     }

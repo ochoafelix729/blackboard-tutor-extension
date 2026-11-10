@@ -1,26 +1,22 @@
-// Loads private Phase 1 lecture manifests and retrieves time-aligned transcript and frame evidence.
+// Retrieves watched, time-aligned Phase 2 evidence using temporal, lexical, and semantic ranking.
 
 import { promises as fileSystem } from "node:fs";
 import path from "node:path";
+import {
+    lectureContextLookbackSeconds,
+    lectureFutureToleranceSeconds
+} from "../src/shared/questionScope";
 import type { tutorStrategy } from "../src/shared/tutor";
-import { parseWebVtt, type TranscriptSegment } from "./vttParser";
-
-interface LectureFrameManifest
-{
-    id: string;
-    timestampSeconds: number;
-    path: string;
-    description: string | null;
-}
-
-interface LectureEvidenceManifest
-{
-    version: number;
-    lectureId: string;
-    title: string;
-    transcriptPath: string;
-    frames: LectureFrameManifest[];
-}
+import type { ModelProvider } from "./ModelProvider";
+import { PhaseTwoStore } from "./PhaseTwoStore";
+import type {
+    EmbeddingArtifact,
+    LectureSegment,
+    SegmentArtifact,
+    TranscriptArtifact,
+    VisualArtifact
+} from "./ingestionTypes";
+import type { TranscriptSegment } from "./vttParser";
 
 export interface RetrievedFrame
 {
@@ -38,8 +34,6 @@ export interface RetrievedEvidence
     frames: RetrievedFrame[];
 }
 
-const maximumManifestBytes = 1_000_000;
-const maximumTranscriptBytes = 25_000_000;
 const maximumFrameBytes = 6_000_000;
 const ignoredTerms = new Set([
     "about",
@@ -59,131 +53,65 @@ const ignoredTerms = new Set([
     "would"
 ]);
 
-function isRecord(value: unknown): value is Record<string, unknown>
-{
-    return typeof value === "object" && value !== null;
-}
-
-function normalizeManifest(value: unknown): LectureEvidenceManifest | null
-{
-    if (!isRecord(value)
-        || value.version !== 1
-        || typeof value.lectureId !== "string"
-        || typeof value.title !== "string"
-        || typeof value.transcriptPath !== "string"
-        || !Array.isArray(value.frames))
-    {
-        return null;
-    }
-
-    const frames: LectureFrameManifest[] = [];
-
-    for (const item of value.frames)
-    {
-        if (!isRecord(item)
-            || typeof item.id !== "string"
-            || typeof item.timestampSeconds !== "number"
-            || !Number.isFinite(item.timestampSeconds)
-            || item.timestampSeconds < 0
-            || typeof item.path !== "string"
-            || !(item.description === undefined
-                || item.description === null
-                || typeof item.description === "string"))
-        {
-            return null;
-        }
-
-        frames.push({
-            id: item.id,
-            timestampSeconds: item.timestampSeconds,
-            path: item.path,
-            description: typeof item.description === "string" ? item.description : null
-        });
-    }
-
-    return {
-        version: 1,
-        lectureId: value.lectureId,
-        title: value.title,
-        transcriptPath: value.transcriptPath,
-        frames
-    };
-}
-
-function resolveContainedPath(parentDirectory: string, relativePath: string): string
-{
-    const resolvedParent = path.resolve(parentDirectory);
-    const resolvedPath = path.resolve(resolvedParent, relativePath);
-
-    if (resolvedPath !== resolvedParent && !resolvedPath.startsWith(`${resolvedParent}${path.sep}`))
-    {
-        throw new Error("Evidence paths must stay inside the manifest directory.");
-    }
-
-    return resolvedPath;
-}
-
-async function readLimitedFile(filePath: string, maximumBytes: number): Promise<Buffer>
-{
-    const statistics = await fileSystem.stat(filePath);
-
-    if (!statistics.isFile() || statistics.size > maximumBytes)
-    {
-        throw new Error(`Evidence file is missing or exceeds ${maximumBytes} bytes.`);
-    }
-
-    return fileSystem.readFile(filePath);
-}
-
 function getQuestionTerms(question: string): Set<string>
 {
     const terms = question.toLowerCase().match(/[a-z0-9]+/g) ?? [];
     return new Set(terms.filter((term) => term.length > 2 && !ignoredTerms.has(term)));
 }
 
-function getTranscriptScore(
-    segment: TranscriptSegment,
-    timestampSeconds: number,
-    questionTerms: Set<string>
-): number
+function getLexicalScore(text: string, questionTerms: Set<string>): number
 {
-    const midpoint = (segment.startSeconds + segment.endSeconds) / 2;
-    const temporalScore = Math.max(0, 1 - Math.abs(timestampSeconds - midpoint) / 180);
-    const segmentTerms = new Set(segment.text.toLowerCase().match(/[a-z0-9]+/g) ?? []);
+    if (questionTerms.size === 0)
+    {
+        return 0;
+    }
+
+    const candidateTerms = new Set(text.toLowerCase().match(/[a-z0-9]+/g) ?? []);
     let matchingTermCount = 0;
 
     for (const term of questionTerms)
     {
-        if (segmentTerms.has(term))
+        if (candidateTerms.has(term))
         {
             matchingTermCount += 1;
         }
     }
 
-    const lexicalScore = questionTerms.size === 0 ? 0 : matchingTermCount / questionTerms.size;
-    return temporalScore + lexicalScore * 2;
+    return matchingTermCount / questionTerms.size;
 }
 
-function selectTranscript(
-    segments: TranscriptSegment[],
-    timestampSeconds: number,
-    question: string
-): TranscriptSegment[]
+function getTemporalScore(startSeconds: number, endSeconds: number, timestampSeconds: number): number
 {
-    const watchedCutoff = timestampSeconds + 15;
-    // Limit retrieval to material already watched, allowing a small cue-boundary tolerance.
-    const watchedSegments = segments.filter((segment) => segment.startSeconds <= watchedCutoff);
-    const terms = getQuestionTerms(question);
-    // Rank for relevance, then restore lecture order so context reads naturally to the model.
-    return watchedSegments
-        .map((segment) => ({
-            segment,
-            score: getTranscriptScore(segment, timestampSeconds, terms)
-        }))
-        .sort((first, second) => second.score - first.score)
-        .slice(0, 10)
-        .map((item) => item.segment)
-        .sort((first, second) => first.startSeconds - second.startSeconds);
+    const midpoint = (startSeconds + endSeconds) / 2;
+    return Math.max(0, 1 - Math.abs(timestampSeconds - midpoint) / 300);
+}
+
+function getCosineSimilarity(first: number[], second: number[]): number
+{
+    if (first.length === 0 || first.length !== second.length)
+    {
+        return 0;
+    }
+
+    let dotProduct = 0;
+    let firstMagnitude = 0;
+    let secondMagnitude = 0;
+
+    for (let index = 0; index < first.length; index += 1)
+    {
+        const firstValue = first[index] ?? 0;
+        const secondValue = second[index] ?? 0;
+        dotProduct += firstValue * secondValue;
+        firstMagnitude += firstValue * firstValue;
+        secondMagnitude += secondValue * secondValue;
+    }
+
+    if (firstMagnitude === 0 || secondMagnitude === 0)
+    {
+        return 0;
+    }
+
+    return dotProduct / (Math.sqrt(firstMagnitude) * Math.sqrt(secondMagnitude));
 }
 
 function getFrameMimeType(filePath: string): string
@@ -214,13 +142,43 @@ function getFrameMimeType(filePath: string): string
     }
 }
 
+function selectTranscriptWithoutSegments(
+    transcript: TranscriptSegment[],
+    timestampSeconds: number,
+    questionTerms: Set<string>
+): TranscriptSegment[]
+{
+    const earliestContextSeconds = Math.max(0, timestampSeconds - lectureContextLookbackSeconds);
+    const latestContextSeconds = timestampSeconds + lectureFutureToleranceSeconds;
+
+    return transcript
+        .filter((segment) =>
+        {
+            return segment.endSeconds >= earliestContextSeconds
+                && segment.startSeconds <= latestContextSeconds;
+        })
+        .map((segment) => ({
+            segment,
+            score: getTemporalScore(segment.startSeconds, segment.endSeconds, timestampSeconds)
+                + getLexicalScore(segment.text, questionTerms) * 2
+        }))
+        .sort((first, second) => second.score - first.score)
+        .slice(0, 12)
+        .map((item) => item.segment)
+        .sort((first, second) => first.startSeconds - second.startSeconds);
+}
+
 export class EvidenceRepository
 {
-    private readonly evidenceDirectory: string;
+    private readonly store: PhaseTwoStore;
+    private readonly provider: ModelProvider;
+    private readonly embeddingModel: string;
 
-    constructor(evidenceDirectory: string)
+    constructor(store: PhaseTwoStore, provider: ModelProvider, embeddingModel: string)
     {
-        this.evidenceDirectory = evidenceDirectory;
+        this.store = store;
+        this.provider = provider;
+        this.embeddingModel = embeddingModel;
     }
 
     async retrieve(
@@ -230,103 +188,185 @@ export class EvidenceRepository
         strategy: tutorStrategy
     ): Promise<RetrievedEvidence>
     {
-        const located = await this.findManifest(lectureId);
-        const manifestDirectory = path.dirname(located.path);
-        const transcriptPath = resolveContainedPath(manifestDirectory, located.manifest.transcriptPath);
-        const transcriptBuffer = await readLimitedFile(transcriptPath, maximumTranscriptBytes);
-        const allTranscript = parseWebVtt(transcriptBuffer.toString("utf8"));
-        const transcript = selectTranscript(allTranscript, timestampSeconds, question);
+        const lecture = await this.store.getLecture(lectureId);
+        const transcriptArtifact = await this.store.readArtifact<TranscriptArtifact>(lectureId, "transcript");
 
-        if (transcript.length === 0)
+        if (lecture === null || transcriptArtifact === null)
+        {
+            throw new Error("The durable lecture transcript is not ready.");
+        }
+
+        const questionTerms = getQuestionTerms(question);
+        const segments = await this.store.readArtifact<SegmentArtifact>(lectureId, "segments");
+        const selectedSegments = segments === null
+            ? []
+            : await this.selectSegments(lectureId, segments.segments, timestampSeconds, question, questionTerms);
+        const selectedTranscript = selectedSegments.length === 0
+            ? selectTranscriptWithoutSegments(
+                transcriptArtifact.segments,
+                timestampSeconds,
+                questionTerms
+            )
+            : this.selectTranscriptForSegments(
+                transcriptArtifact.segments,
+                selectedSegments,
+                timestampSeconds,
+                questionTerms
+            );
+
+        if (selectedTranscript.length === 0)
         {
             throw new Error("The lecture transcript has no evidence at or before this timestamp.");
         }
 
         const frames = strategy === "multimodal"
-            ? await this.loadNearbyFrames(located.manifest, manifestDirectory, timestampSeconds)
+            ? await this.loadFrames(lectureId, timestampSeconds, selectedSegments)
             : [];
-
         return {
-            lectureId: located.manifest.lectureId,
-            lectureTitle: located.manifest.title,
-            transcript,
+            lectureId,
+            lectureTitle: lecture.title,
+            transcript: selectedTranscript,
             frames
         };
     }
 
-    private async findManifest(lectureId: string): Promise<{
-        path: string;
-        manifest: LectureEvidenceManifest;
-    }>
+    private async selectSegments(
+        lectureId: string,
+        segments: LectureSegment[],
+        timestampSeconds: number,
+        question: string,
+        questionTerms: Set<string>
+    ): Promise<LectureSegment[]>
     {
-        let entries;
-
-        try
+        const earliestContextSeconds = Math.max(0, timestampSeconds - lectureContextLookbackSeconds);
+        const latestContextSeconds = timestampSeconds + lectureFutureToleranceSeconds;
+        const watchedSegments = segments.filter((segment) =>
         {
-            entries = await fileSystem.readdir(this.evidenceDirectory, { withFileTypes: true });
-        }
-        catch
+            return segment.endSeconds >= earliestContextSeconds
+                && segment.startSeconds <= latestContextSeconds;
+        });
+        const embeddingArtifact = await this.store.readArtifact<EmbeddingArtifact>(lectureId, "embeddings");
+        const embeddingBySegment = new Map(
+            embeddingArtifact?.embeddings.map((embedding) => [embedding.segmentId, embedding.vector]) ?? []
+        );
+        let questionVector: number[] = [];
+
+        if (embeddingArtifact !== null)
         {
-            throw new Error(`Evidence directory is unavailable: ${this.evidenceDirectory}`);
-        }
-
-        for (const entry of entries)
-        {
-            if (!entry.isFile() || path.extname(entry.name).toLowerCase() !== ".json")
-            {
-                continue;
-            }
-
-            const manifestPath = path.join(this.evidenceDirectory, entry.name);
-            const buffer = await readLimitedFile(manifestPath, maximumManifestBytes);
-            let parsed: unknown;
-
             try
             {
-                parsed = JSON.parse(buffer.toString("utf8"));
+                const result = await this.provider.embed({
+                    model: embeddingArtifact.model || this.embeddingModel,
+                    inputs: [question]
+                });
+                questionVector = result.vectors[0] ?? [];
             }
             catch
             {
-                continue;
-            }
-
-            const manifest = normalizeManifest(parsed);
-
-            if (manifest?.lectureId === lectureId)
-            {
-                return { path: manifestPath, manifest };
+                // Semantic retrieval is an optional enrichment; temporal and lexical search stay usable.
             }
         }
 
-        throw new Error(`No Phase 1 evidence manifest matches lecture ID ${lectureId}.`);
+        return watchedSegments
+            .map((segment) =>
+            {
+                const semanticScore = getCosineSimilarity(
+                    questionVector,
+                    embeddingBySegment.get(segment.id) ?? []
+                );
+                return {
+                    segment,
+                    score: getTemporalScore(segment.startSeconds, segment.endSeconds, timestampSeconds)
+                        + getLexicalScore(segment.searchText, questionTerms) * 2
+                        + Math.max(0, semanticScore) * 1.5
+                };
+            })
+            .sort((first, second) => second.score - first.score)
+            .slice(0, 4)
+            .map((item) => item.segment)
+            .sort((first, second) => first.startSeconds - second.startSeconds);
     }
 
-    private async loadNearbyFrames(
-        manifest: LectureEvidenceManifest,
-        manifestDirectory: string,
-        timestampSeconds: number
+    private selectTranscriptForSegments(
+        transcript: TranscriptSegment[],
+        selectedSegments: LectureSegment[],
+        timestampSeconds: number,
+        questionTerms: Set<string>
+    ): TranscriptSegment[]
+    {
+        const transcriptIds = new Set(selectedSegments.flatMap((segment) => segment.transcriptIds));
+        const earliestContextSeconds = Math.max(0, timestampSeconds - lectureContextLookbackSeconds);
+        const latestContextSeconds = timestampSeconds + lectureFutureToleranceSeconds;
+        return transcript
+            .filter((segment) =>
+            {
+                return transcriptIds.has(segment.id)
+                    && segment.endSeconds >= earliestContextSeconds
+                    && segment.startSeconds <= latestContextSeconds;
+            })
+            .map((segment) => ({
+                segment,
+                score: getTemporalScore(segment.startSeconds, segment.endSeconds, timestampSeconds)
+                    + getLexicalScore(segment.text, questionTerms) * 2
+            }))
+            .sort((first, second) => second.score - first.score)
+            .slice(0, 12)
+            .map((item) => item.segment)
+            .sort((first, second) => first.startSeconds - second.startSeconds);
+    }
+
+    private async loadFrames(
+        lectureId: string,
+        timestampSeconds: number,
+        selectedSegments: LectureSegment[]
     ): Promise<RetrievedFrame[]>
     {
-        const nearbyFrames = manifest.frames
-            // Do not expose frames materially later than the student's current position.
-            .filter((frame) => frame.timestampSeconds <= timestampSeconds + 15)
+        const visuals = await this.store.readArtifact<VisualArtifact>(lectureId, "visuals");
+
+        if (visuals === null)
+        {
+            return [];
+        }
+
+        const selectedVisualIds = new Set(selectedSegments.flatMap((segment) => segment.visualIds));
+        const earliestContextSeconds = Math.max(0, timestampSeconds - lectureContextLookbackSeconds);
+        const latestContextSeconds = timestampSeconds + lectureFutureToleranceSeconds;
+        const watchedFrames = visuals.frames.filter((frame) =>
+        {
+            return frame.timestampSeconds >= earliestContextSeconds
+                && frame.timestampSeconds <= latestContextSeconds;
+        });
+        const frames = watchedFrames
             .sort((first, second) =>
             {
+                const firstSelected = selectedVisualIds.has(first.id) ? 1 : 0;
+                const secondSelected = selectedVisualIds.has(second.id) ? 1 : 0;
+
+                if (firstSelected !== secondSelected)
+                {
+                    return secondSelected - firstSelected;
+                }
+
                 return Math.abs(first.timestampSeconds - timestampSeconds)
                     - Math.abs(second.timestampSeconds - timestampSeconds);
             })
             .slice(0, 2);
-
-        return Promise.all(nearbyFrames.map(async (frame) =>
+        return Promise.all(frames.map(async (frame) =>
         {
-            const framePath = resolveContainedPath(manifestDirectory, frame.path);
-            const buffer = await readLimitedFile(framePath, maximumFrameBytes);
-            const mimeType = getFrameMimeType(framePath);
+            const framePath = this.store.getArtifactImagePath(lectureId, frame.relativeImagePath);
+            const statistics = await fileSystem.stat(framePath);
+
+            if (!statistics.isFile() || statistics.size > maximumFrameBytes)
+            {
+                throw new Error(`Representative frame is missing or exceeds ${maximumFrameBytes} bytes.`);
+            }
+
+            const buffer = await fileSystem.readFile(framePath);
             return {
                 id: frame.id,
                 timestampSeconds: frame.timestampSeconds,
                 description: frame.description,
-                dataUrl: `data:${mimeType};base64,${buffer.toString("base64")}`
+                dataUrl: `data:${getFrameMimeType(framePath)};base64,${buffer.toString("base64")}`
             };
         }));
     }

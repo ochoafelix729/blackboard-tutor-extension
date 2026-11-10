@@ -1,5 +1,6 @@
 // Renders the isolated tutor sidebar and forwards user interactions.
 
+import type { LectureProcessingStatus } from "../shared/ingestion";
 import type { downloadStatus, LectureState, PlaybackSnapshot } from "../shared/protocol";
 import type { TutorAnswer, tutorStrategy } from "../shared/tutor";
 import {
@@ -183,13 +184,25 @@ const sidebarMarkup = `
             font-size: 13px;
         }
 
-        .media-status {
+        .media-status,
+        .tutor-status {
             min-width: 0;
-            overflow: hidden;
             color: #68748a;
             font-size: 12px;
+        }
+
+        .media-status {
+            overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
+        }
+
+        .tutor-status[data-status="ready"] {
+            color: #247447;
+        }
+
+        .tutor-status[data-status="failed"] {
+            color: #a33c37;
         }
 
         .lecture-id {
@@ -403,6 +416,9 @@ const sidebarMarkup = `
                 <span class="media-status">Waiting for authorized media…</span>
             </div>
             <div class="context-row">
+                <span class="tutor-status">Checking Phase 2 evidence…</span>
+            </div>
+            <div class="context-row">
                 <input
                     class="lecture-id"
                     type="text"
@@ -415,10 +431,10 @@ const sidebarMarkup = `
         </section>
         <div class="messages" role="log" aria-live="polite"></div>
         <form class="composer">
-            <textarea aria-label="Ask about this lecture" placeholder="Ask about what the professor is explaining…" required></textarea>
+            <textarea aria-label="Ask about this lecture" placeholder="Ask about now or the last 10 minutes…" required></textarea>
             <label class="consent">
                 <input type="checkbox" class="consent-input">
-                <span>Send retrieved lecture evidence—including frames when selected—to the configured AI provider.</span>
+                <span>Process this authorized lecture locally and send only required audio or retrieved evidence to the configured AI provider.</span>
             </label>
             <div class="composer-row">
                 <select class="strategy" aria-label="Tutor evidence strategy">
@@ -428,7 +444,7 @@ const sidebarMarkup = `
                 <button class="ask" type="submit">Ask</button>
             </div>
             <div class="composer-row">
-                <span class="hint">Playback time and estimated API cost are attached</span>
+                <span class="hint">For full-lecture questions, download the video and use a chat model</span>
             </div>
         </form>
     </aside>
@@ -495,6 +511,7 @@ export class SidebarView
     private readonly lectureTitle: HTMLElement;
     private readonly time: HTMLElement;
     private readonly mediaStatus: HTMLElement;
+    private readonly tutorStatus: HTMLElement;
     private readonly lectureId: HTMLInputElement;
     private readonly downloadButton: HTMLButtonElement;
     private readonly messages: HTMLElement;
@@ -525,6 +542,7 @@ export class SidebarView
         this.lectureTitle = requireElement(shadowRoot, ".lecture-title");
         this.time = requireElement(shadowRoot, ".time");
         this.mediaStatus = requireElement(shadowRoot, ".media-status");
+        this.tutorStatus = requireElement(shadowRoot, ".tutor-status");
         this.lectureId = requireElement(shadowRoot, ".lecture-id");
         this.downloadButton = requireElement(shadowRoot, ".download");
         this.messages = requireElement(shadowRoot, ".messages");
@@ -623,7 +641,7 @@ export class SidebarView
         this.updateAskAvailability();
         this.addMessage(
             "assistant",
-            "I’m tracking the lecture’s playback position. Ask a question to capture it with the current timestamp."
+            "Ask about what’s happening now or within the last 10 minutes. For full-lecture questions, download the video and use a chat model."
         );
     }
 
@@ -689,6 +707,29 @@ export class SidebarView
         {
             this.addMessage("assistant", message);
         }
+    }
+
+    setTutorStatus(status: LectureProcessingStatus | null, fallbackMessage?: string): void
+    {
+        if (status === null)
+        {
+            this.tutorStatus.textContent = fallbackMessage ?? "Phase 2 evidence status unavailable";
+            this.tutorStatus.removeAttribute("data-status");
+            this.tutorStatus.removeAttribute("title");
+            return;
+        }
+
+        this.tutorStatus.dataset.status = status.status;
+        this.tutorStatus.textContent = status.message;
+        const readyCapabilities = [
+            status.capabilities.hasTranscript ? "transcript" : null,
+            status.capabilities.hasVisuals ? "visuals" : null,
+            status.capabilities.hasSegments ? "segments" : null,
+            status.capabilities.hasSemanticSearch ? "semantic search" : null
+        ].filter((value): value is string => value !== null);
+        this.tutorStatus.title = readyCapabilities.length > 0
+            ? `Ready: ${readyCapabilities.join(", ")}`
+            : "No evidence stage is ready yet";
     }
 
     addMessage(role: messageRole, text: string, timestampSeconds?: number): void

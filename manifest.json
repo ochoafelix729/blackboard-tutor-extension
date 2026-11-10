@@ -1,8 +1,8 @@
 {
     "manifest_version": 3,
     "name": "Blackboard Lecture Tutor",
-    "version": "0.3.0",
-    "description": "Download authorized Class.com recordings and capture playback context for lecture tutoring.",
+    "version": "0.4.0",
+    "description": "Download authorized Class.com recordings and tutor from durable playback-aware lecture evidence.",
     "permissions": [
         "downloads",
         "storage",

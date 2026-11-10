@@ -128,8 +128,96 @@
     return createPageIdentity(pageUrl);
   }
 
-  // src/shared/tutor.ts
+  // src/shared/ingestion.ts
   function isRecord(value) {
+    return typeof value === "object" && value !== null;
+  }
+  function isProcessingStage(value) {
+    return value === "metadata" || value === "transcript" || value === "visuals" || value === "segments" || value === "embeddings";
+  }
+  function isProcessingStatus(value) {
+    return value === "notStarted" || value === "queued" || value === "processing" || value === "ready" || value === "failed";
+  }
+  function isStageProcessingStatus(value) {
+    return isRecord(value) && isProcessingStage(value.stage) && isProcessingStatus(value.status) && typeof value.attempts === "number" && Number.isInteger(value.attempts) && value.attempts >= 0 && (value.error === null || typeof value.error === "string");
+  }
+  function isLectureCapabilities(value) {
+    return isRecord(value) && typeof value.hasTranscript === "boolean" && typeof value.hasVisuals === "boolean" && typeof value.hasSegments === "boolean" && typeof value.hasSemanticSearch === "boolean";
+  }
+  function isLectureProcessingStatus(value) {
+    return isRecord(value) && typeof value.lectureId === "string" && typeof value.title === "string" && isProcessingStatus(value.status) && Array.isArray(value.stages) && value.stages.every(isStageProcessingStatus) && isLectureCapabilities(value.capabilities) && typeof value.message === "string";
+  }
+
+  // src/shared/questionScope.ts
+  var lectureContextLookbackSeconds = 10 * 60;
+  var fullLecturePatterns = [
+    /\b(?:entire|whole|full)\s+(?:lecture|video|recording)\b/i,
+    /\b(?:summarize|recap|outline)\s+(?:(?:this|the)\s+)?(?:lecture|video|recording)\b/i,
+    /\b(?:summary|recap|overview)\s+of\s+(?:(?:this|the)\s+)?(?:lecture|video|recording)\b/i,
+    /\b(?:across|throughout)\s+(?:this|the)\s+(?:lecture|video|recording)\b/i,
+    /\b(?:main|key)\s+(?:topics?|points?|concepts?)\b.{0,40}\b(?:lecture|video|recording)\b/i,
+    /\bwhat\s+(?:did|does)\s+(?:the\s+)?professor\s+cover\s+in\s+(?:this|the)\s+lecture\b/i
+  ];
+  var ambiguousEarlierPatterns = [
+    /\bearlier\s+in\s+(?:this|the)\s+(?:lecture|video|recording)\b/i,
+    /\b(?:at|from)\s+(?:the\s+)?(?:beginning|start)\s+of\s+(?:this|the)\s+(?:lecture|video|recording)\b/i,
+    /\bback\s+(?:at|in)\s+(?:the\s+)?(?:beginning|start)\b/i
+  ];
+  function asksAboutFullLecture(question) {
+    return fullLecturePatterns.some((pattern) => pattern.test(question));
+  }
+  function hasAmbiguousEarlierReference(question) {
+    return ambiguousEarlierPatterns.some((pattern) => pattern.test(question));
+  }
+  function getExplicitLookbackSeconds(question) {
+    const numericMatch = question.match(
+      /\b(\d+(?:\.\d+)?)\s+(seconds?|secs?|minutes?|mins?|hours?|hrs?)\s+ago\b/i
+    );
+    if (numericMatch !== null) {
+      const amount = Number(numericMatch[1]);
+      const unit = numericMatch[2]?.toLowerCase() ?? "seconds";
+      if (unit.startsWith("hour") || unit.startsWith("hr")) {
+        return amount * 3600;
+      }
+      if (unit.startsWith("minute") || unit.startsWith("min")) {
+        return amount * 60;
+      }
+      return amount;
+    }
+    if (/\b(?:half an hour|an hour|one hour)\s+ago\b/i.test(question)) {
+      return /\bhalf an hour\s+ago\b/i.test(question) ? 1800 : 3600;
+    }
+    return null;
+  }
+  function evaluateQuestionScope(question, timestampSeconds) {
+    const normalizedQuestion = question.replace(/\s+/g, " ").trim();
+    if (asksAboutFullLecture(normalizedQuestion)) {
+      return {
+        isAllowed: false,
+        reason: "fullLecture",
+        message: "This tutor is designed for the current moment and the preceding 10 minutes, not full-lecture analysis. Use Download to save the recording, then share it with a chat model for questions about the entire lecture."
+      };
+    }
+    const explicitLookbackSeconds = getExplicitLookbackSeconds(normalizedQuestion);
+    if (explicitLookbackSeconds !== null && explicitLookbackSeconds > lectureContextLookbackSeconds) {
+      return {
+        isAllowed: false,
+        reason: "distantTimeReference",
+        message: "I can only inspect the current moment and the preceding 10 minutes. Seek closer to that part of the lecture, then ask again."
+      };
+    }
+    if (timestampSeconds > lectureContextLookbackSeconds && hasAmbiguousEarlierReference(normalizedQuestion)) {
+      return {
+        isAllowed: false,
+        reason: "ambiguousEarlierReference",
+        message: "\u201CEarlier in the lecture\u201D is outside the tutor\u2019s reliable scope here. Ask about the last 10 minutes, or seek back to the earlier moment and ask again."
+      };
+    }
+    return { isAllowed: true };
+  }
+
+  // src/shared/tutor.ts
+  function isRecord2(value) {
     return typeof value === "object" && value !== null;
   }
   function isTutorStrategy(value) {
@@ -142,40 +230,40 @@
     return Array.isArray(value) && value.every((item) => typeof item === "string");
   }
   function isTutorCitation(value) {
-    if (!isRecord(value)) {
+    if (!isRecord2(value)) {
       return false;
     }
     return isFiniteNonnegativeNumber(value.startSeconds) && isFiniteNonnegativeNumber(value.endSeconds) && value.endSeconds >= value.startSeconds && isStringArray(value.evidenceIds);
   }
   function isTutorCostSummary(value) {
-    if (!isRecord(value)) {
+    if (!isRecord2(value)) {
       return false;
     }
     return typeof value.traceId === "string" && typeof value.provider === "string" && typeof value.model === "string" && isFiniteNonnegativeNumber(value.inputTokens) && isFiniteNonnegativeNumber(value.outputTokens) && (value.estimatedCostUsd === null || isFiniteNonnegativeNumber(value.estimatedCostUsd));
   }
   function isTutorAnswer(value) {
-    if (!isRecord(value)) {
+    if (!isRecord2(value)) {
       return false;
     }
     return typeof value.answer === "string" && value.answer.length > 0 && Array.isArray(value.citations) && value.citations.every(isTutorCitation) && isStringArray(value.usedModalities) && isStringArray(value.limitations) && isTutorStrategy(value.strategy) && isTutorCostSummary(value.cost);
   }
 
   // src/shared/protocol.ts
-  function isRecord2(value) {
+  function isRecord3(value) {
     return typeof value === "object" && value !== null;
   }
   function isNullableString(value) {
     return typeof value === "string" || value === null;
   }
   function isPlaybackSnapshot(value) {
-    if (!isRecord2(value)) {
+    if (!isRecord3(value)) {
       return false;
     }
     const hasValidDuration = value.duration === null || typeof value.duration === "number" && Number.isFinite(value.duration);
     return typeof value.currentTime === "number" && Number.isFinite(value.currentTime) && hasValidDuration && typeof value.isPaused === "boolean" && typeof value.hasVideo === "boolean" && typeof value.visibleArea === "number" && Number.isFinite(value.visibleArea) && typeof value.capturedAt === "number" && Number.isFinite(value.capturedAt);
   }
   function isBackgroundNotification(value) {
-    if (!isRecord2(value) || typeof value.kind !== "string") {
+    if (!isRecord3(value) || typeof value.kind !== "string") {
       return false;
     }
     switch (value.kind) {
@@ -198,20 +286,20 @@
     }
   }
   function isBackgroundResponse(value) {
-    if (!isRecord2(value) || typeof value.ok !== "boolean") {
+    if (!isRecord3(value) || typeof value.ok !== "boolean") {
       return false;
     }
     if (value.ok) {
       return true;
     }
-    return isRecord2(value.error) && typeof value.error.code === "string" && typeof value.error.message === "string";
+    return isRecord3(value.error) && typeof value.error.code === "string" && typeof value.error.message === "string";
   }
   function isLectureState(value) {
-    if (!isRecord2(value) || !isNullableString(value.lectureId) || !Array.isArray(value.mediaOptions)) {
+    if (!isRecord3(value) || !isNullableString(value.lectureId) || !Array.isArray(value.mediaOptions)) {
       return false;
     }
     return typeof value.canDownload === "boolean" && value.mediaOptions.every((option) => {
-      return isRecord2(option) && typeof option.assetKey === "string" && typeof option.kind === "string" && typeof option.label === "string" && (option.expiresAt === null || typeof option.expiresAt === "number") && typeof option.isExpired === "boolean";
+      return isRecord3(option) && typeof option.assetKey === "string" && typeof option.kind === "string" && typeof option.label === "string" && (option.expiresAt === null || typeof option.expiresAt === "number") && typeof option.isExpired === "boolean";
     });
   }
 
@@ -488,13 +576,25 @@
             font-size: 13px;
         }
 
-        .media-status {
+        .media-status,
+        .tutor-status {
             min-width: 0;
-            overflow: hidden;
             color: #68748a;
             font-size: 12px;
+        }
+
+        .media-status {
+            overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
+        }
+
+        .tutor-status[data-status="ready"] {
+            color: #247447;
+        }
+
+        .tutor-status[data-status="failed"] {
+            color: #a33c37;
         }
 
         .lecture-id {
@@ -708,6 +808,9 @@
                 <span class="media-status">Waiting for authorized media\u2026</span>
             </div>
             <div class="context-row">
+                <span class="tutor-status">Checking Phase 2 evidence\u2026</span>
+            </div>
+            <div class="context-row">
                 <input
                     class="lecture-id"
                     type="text"
@@ -720,10 +823,10 @@
         </section>
         <div class="messages" role="log" aria-live="polite"></div>
         <form class="composer">
-            <textarea aria-label="Ask about this lecture" placeholder="Ask about what the professor is explaining\u2026" required></textarea>
+            <textarea aria-label="Ask about this lecture" placeholder="Ask about now or the last 10 minutes\u2026" required></textarea>
             <label class="consent">
                 <input type="checkbox" class="consent-input">
-                <span>Send retrieved lecture evidence\u2014including frames when selected\u2014to the configured AI provider.</span>
+                <span>Process this authorized lecture locally and send only required audio or retrieved evidence to the configured AI provider.</span>
             </label>
             <div class="composer-row">
                 <select class="strategy" aria-label="Tutor evidence strategy">
@@ -733,7 +836,7 @@
                 <button class="ask" type="submit">Ask</button>
             </div>
             <div class="composer-row">
-                <span class="hint">Playback time and estimated API cost are attached</span>
+                <span class="hint">For full-lecture questions, download the video and use a chat model</span>
             </div>
         </form>
     </aside>
@@ -784,6 +887,7 @@
     lectureTitle;
     time;
     mediaStatus;
+    tutorStatus;
     lectureId;
     downloadButton;
     messages;
@@ -811,6 +915,7 @@
       this.lectureTitle = requireElement(shadowRoot, ".lecture-title");
       this.time = requireElement(shadowRoot, ".time");
       this.mediaStatus = requireElement(shadowRoot, ".media-status");
+      this.tutorStatus = requireElement(shadowRoot, ".tutor-status");
       this.lectureId = requireElement(shadowRoot, ".lecture-id");
       this.downloadButton = requireElement(shadowRoot, ".download");
       this.messages = requireElement(shadowRoot, ".messages");
@@ -886,7 +991,7 @@
       this.updateAskAvailability();
       this.addMessage(
         "assistant",
-        "I\u2019m tracking the lecture\u2019s playback position. Ask a question to capture it with the current timestamp."
+        "Ask about what\u2019s happening now or within the last 10 minutes. For full-lecture questions, download the video and use a chat model."
       );
     }
     toggle() {
@@ -928,6 +1033,23 @@
       if (status === "failed") {
         this.addMessage("assistant", message);
       }
+    }
+    setTutorStatus(status, fallbackMessage) {
+      if (status === null) {
+        this.tutorStatus.textContent = fallbackMessage ?? "Phase 2 evidence status unavailable";
+        this.tutorStatus.removeAttribute("data-status");
+        this.tutorStatus.removeAttribute("title");
+        return;
+      }
+      this.tutorStatus.dataset.status = status.status;
+      this.tutorStatus.textContent = status.message;
+      const readyCapabilities = [
+        status.capabilities.hasTranscript ? "transcript" : null,
+        status.capabilities.hasVisuals ? "visuals" : null,
+        status.capabilities.hasSegments ? "segments" : null,
+        status.capabilities.hasSemanticSearch ? "semantic search" : null
+      ].filter((value) => value !== null);
+      this.tutorStatus.title = readyCapabilities.length > 0 ? `Ready: ${readyCapabilities.join(", ")}` : "No evidence stage is ready yet";
     }
     addMessage(role, text, timestampSeconds) {
       const message = document.createElement("div");
@@ -1257,7 +1379,9 @@
       }, 1e3);
       window.setInterval(() => {
         void this.refreshLectureState();
+        void this.refreshTutorStatus();
       }, 5e3);
+      void this.refreshTutorStatus();
     }
     installMessageListener() {
       chrome.runtime.onMessage.addListener((message) => {
@@ -1326,6 +1450,24 @@
         await this.refreshLectureState();
       }
     }
+    async refreshTutorStatus() {
+      const lectureId = this.lectureState.lectureId;
+      if (lectureId === null) {
+        this.sidebar.setTutorStatus(null);
+        return;
+      }
+      const response = await sendRequest({
+        kind: "getTutorStatus",
+        lectureId
+      });
+      if (!response.ok) {
+        this.sidebar.setTutorStatus(null, response.error.message);
+        return;
+      }
+      if (isLectureProcessingStatus(response.data)) {
+        this.sidebar.setTutorStatus(response.data);
+      }
+    }
     async askQuestion(question, playback, strategy) {
       const timestamp = playback?.currentTime ?? this.latestPlayback?.currentTime;
       this.sidebar.addMessage("user", question, timestamp);
@@ -1334,6 +1476,11 @@
           "assistant",
           "Start or pause the lecture so I can attach a playback timestamp, then ask again."
         );
+        return;
+      }
+      const scopeDecision = evaluateQuestionScope(question, timestamp);
+      if (!scopeDecision.isAllowed) {
+        this.sidebar.addMessage("assistant", scopeDecision.message);
         return;
       }
       if (this.lectureState.lectureId === null) {
@@ -1347,6 +1494,7 @@
       try {
         const response = await sendRequest({
           kind: "askTutor",
+          lectureTitle: getLectureTitle(),
           question: {
             lectureId: this.lectureState.lectureId,
             timestampSeconds: timestamp,
@@ -1357,6 +1505,7 @@
         });
         if (!response.ok) {
           this.sidebar.addMessage("assistant", response.error.message);
+          void this.refreshTutorStatus();
           return;
         }
         if (!isTutorAnswer(response.data)) {
@@ -1395,9 +1544,12 @@
       this.latestPlayback = null;
       this.sidebar.setLectureTitle(getLectureTitle());
       this.sidebar.setLectureState(this.lectureState);
+      this.sidebar.setTutorStatus(null);
       this.toolbar.setCanDownload(false);
       void sendRequest({ kind: "resetPageState", changedAt }).then(() => {
         return this.refreshLectureState();
+      }).then(() => {
+        return this.refreshTutorStatus();
       });
     }
   };

@@ -212,8 +212,28 @@
     }
   };
 
-  // src/shared/tutor.ts
+  // src/shared/ingestion.ts
   function isRecord(value) {
+    return typeof value === "object" && value !== null;
+  }
+  function isProcessingStage(value) {
+    return value === "metadata" || value === "transcript" || value === "visuals" || value === "segments" || value === "embeddings";
+  }
+  function isProcessingStatus(value) {
+    return value === "notStarted" || value === "queued" || value === "processing" || value === "ready" || value === "failed";
+  }
+  function isStageProcessingStatus(value) {
+    return isRecord(value) && isProcessingStage(value.stage) && isProcessingStatus(value.status) && typeof value.attempts === "number" && Number.isInteger(value.attempts) && value.attempts >= 0 && (value.error === null || typeof value.error === "string");
+  }
+  function isLectureCapabilities(value) {
+    return isRecord(value) && typeof value.hasTranscript === "boolean" && typeof value.hasVisuals === "boolean" && typeof value.hasSegments === "boolean" && typeof value.hasSemanticSearch === "boolean";
+  }
+  function isLectureProcessingStatus(value) {
+    return isRecord(value) && typeof value.lectureId === "string" && typeof value.title === "string" && isProcessingStatus(value.status) && Array.isArray(value.stages) && value.stages.every(isStageProcessingStatus) && isLectureCapabilities(value.capabilities) && typeof value.message === "string";
+  }
+
+  // src/shared/tutor.ts
+  function isRecord2(value) {
     return typeof value === "object" && value !== null;
   }
   function isTutorStrategy(value) {
@@ -226,25 +246,25 @@
     return Array.isArray(value) && value.every((item) => typeof item === "string");
   }
   function isTutorQuestion(value) {
-    if (!isRecord(value)) {
+    if (!isRecord2(value)) {
       return false;
     }
     return typeof value.lectureId === "string" && value.lectureId.length > 0 && isFiniteNonnegativeNumber(value.timestampSeconds) && typeof value.question === "string" && value.question.trim().length > 0 && isTutorStrategy(value.strategy) && (value.currentFrameDataUrl === null || typeof value.currentFrameDataUrl === "string");
   }
   function isTutorCitation(value) {
-    if (!isRecord(value)) {
+    if (!isRecord2(value)) {
       return false;
     }
     return isFiniteNonnegativeNumber(value.startSeconds) && isFiniteNonnegativeNumber(value.endSeconds) && value.endSeconds >= value.startSeconds && isStringArray(value.evidenceIds);
   }
   function isTutorCostSummary(value) {
-    if (!isRecord(value)) {
+    if (!isRecord2(value)) {
       return false;
     }
     return typeof value.traceId === "string" && typeof value.provider === "string" && typeof value.model === "string" && isFiniteNonnegativeNumber(value.inputTokens) && isFiniteNonnegativeNumber(value.outputTokens) && (value.estimatedCostUsd === null || isFiniteNonnegativeNumber(value.estimatedCostUsd));
   }
   function isTutorAnswer(value) {
-    if (!isRecord(value)) {
+    if (!isRecord2(value)) {
       return false;
     }
     return typeof value.answer === "string" && value.answer.length > 0 && Array.isArray(value.citations) && value.citations.every(isTutorCitation) && isStringArray(value.usedModalities) && isStringArray(value.limitations) && isTutorStrategy(value.strategy) && isTutorCostSummary(value.cost);
@@ -252,16 +272,18 @@
 
   // src/background/TutorApiClient.ts
   var tutorApiBaseUrl = "http://127.0.0.1:4387";
-  function isRecord2(value) {
+  function isRecord3(value) {
     return typeof value === "object" && value !== null;
   }
   function getApiError(value) {
-    if (!isRecord2(value) || !isRecord2(value.error) || typeof value.error.code !== "string" || typeof value.error.message !== "string") {
+    if (!isRecord3(value) || !isRecord3(value.error) || typeof value.error.code !== "string" || typeof value.error.message !== "string") {
       return null;
     }
     const supportedCodes = [
       "invalidRequest",
+      "questionOutOfScope",
       "evidenceUnavailable",
+      "lectureProcessing",
       "modelFailed",
       "unexpectedError"
     ];
@@ -274,6 +296,89 @@
     };
   }
   var TutorApiClient = class {
+    async registerLecture(lectureId, title, mediaUrl) {
+      let response;
+      try {
+        response = await fetch(`${tutorApiBaseUrl}/v1/lectures/auto-register`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Blackboard-Tutor": "1"
+          },
+          body: JSON.stringify({ lectureId, title, mediaUrl }),
+          signal: AbortSignal.timeout(1e4)
+        });
+      } catch {
+        return {
+          ok: false,
+          error: {
+            code: "tutorUnavailable",
+            message: "The local Phase 2 tutor API is not running."
+          }
+        };
+      }
+      if (response.ok) {
+        return { ok: true };
+      }
+      let responseBody;
+      try {
+        responseBody = await response.json();
+      } catch {
+        responseBody = null;
+      }
+      return {
+        ok: false,
+        error: getApiError(responseBody) ?? {
+          code: "unexpectedError",
+          message: "The local tutor API could not begin automatic lecture processing."
+        }
+      };
+    }
+    async getStatus(lectureId) {
+      let response;
+      try {
+        const query = new URLSearchParams({ lectureId });
+        response = await fetch(`${tutorApiBaseUrl}/v1/lectures/status?${query.toString()}`, {
+          signal: AbortSignal.timeout(5e3)
+        });
+      } catch {
+        return {
+          ok: false,
+          error: {
+            code: "tutorUnavailable",
+            message: "The local Phase 2 tutor API is not running."
+          }
+        };
+      }
+      let responseBody;
+      try {
+        responseBody = await response.json();
+      } catch {
+        responseBody = null;
+      }
+      if (!response.ok) {
+        return {
+          ok: false,
+          error: getApiError(responseBody) ?? {
+            code: "unexpectedError",
+            message: "The local tutor API returned an unreadable status error."
+          }
+        };
+      }
+      if (!isLectureProcessingStatus(responseBody)) {
+        return {
+          ok: false,
+          error: {
+            code: "unexpectedError",
+            message: "The local tutor API returned an invalid lecture status."
+          }
+        };
+      }
+      return {
+        ok: true,
+        status: responseBody
+      };
+    }
     async ask(question) {
       let response;
       try {
@@ -291,7 +396,7 @@
           ok: false,
           error: {
             code: "tutorUnavailable",
-            message: "The local tutor API is not running. Start it with npm run phase1:server."
+            message: "The local tutor API is not running. Start it with npm run phase2:server."
           }
         };
       }
@@ -478,22 +583,90 @@
     })[0] ?? null;
   }
 
+  // src/shared/questionScope.ts
+  var lectureContextLookbackSeconds = 10 * 60;
+  var fullLecturePatterns = [
+    /\b(?:entire|whole|full)\s+(?:lecture|video|recording)\b/i,
+    /\b(?:summarize|recap|outline)\s+(?:(?:this|the)\s+)?(?:lecture|video|recording)\b/i,
+    /\b(?:summary|recap|overview)\s+of\s+(?:(?:this|the)\s+)?(?:lecture|video|recording)\b/i,
+    /\b(?:across|throughout)\s+(?:this|the)\s+(?:lecture|video|recording)\b/i,
+    /\b(?:main|key)\s+(?:topics?|points?|concepts?)\b.{0,40}\b(?:lecture|video|recording)\b/i,
+    /\bwhat\s+(?:did|does)\s+(?:the\s+)?professor\s+cover\s+in\s+(?:this|the)\s+lecture\b/i
+  ];
+  var ambiguousEarlierPatterns = [
+    /\bearlier\s+in\s+(?:this|the)\s+(?:lecture|video|recording)\b/i,
+    /\b(?:at|from)\s+(?:the\s+)?(?:beginning|start)\s+of\s+(?:this|the)\s+(?:lecture|video|recording)\b/i,
+    /\bback\s+(?:at|in)\s+(?:the\s+)?(?:beginning|start)\b/i
+  ];
+  function asksAboutFullLecture(question) {
+    return fullLecturePatterns.some((pattern) => pattern.test(question));
+  }
+  function hasAmbiguousEarlierReference(question) {
+    return ambiguousEarlierPatterns.some((pattern) => pattern.test(question));
+  }
+  function getExplicitLookbackSeconds(question) {
+    const numericMatch = question.match(
+      /\b(\d+(?:\.\d+)?)\s+(seconds?|secs?|minutes?|mins?|hours?|hrs?)\s+ago\b/i
+    );
+    if (numericMatch !== null) {
+      const amount = Number(numericMatch[1]);
+      const unit = numericMatch[2]?.toLowerCase() ?? "seconds";
+      if (unit.startsWith("hour") || unit.startsWith("hr")) {
+        return amount * 3600;
+      }
+      if (unit.startsWith("minute") || unit.startsWith("min")) {
+        return amount * 60;
+      }
+      return amount;
+    }
+    if (/\b(?:half an hour|an hour|one hour)\s+ago\b/i.test(question)) {
+      return /\bhalf an hour\s+ago\b/i.test(question) ? 1800 : 3600;
+    }
+    return null;
+  }
+  function evaluateQuestionScope(question, timestampSeconds) {
+    const normalizedQuestion = question.replace(/\s+/g, " ").trim();
+    if (asksAboutFullLecture(normalizedQuestion)) {
+      return {
+        isAllowed: false,
+        reason: "fullLecture",
+        message: "This tutor is designed for the current moment and the preceding 10 minutes, not full-lecture analysis. Use Download to save the recording, then share it with a chat model for questions about the entire lecture."
+      };
+    }
+    const explicitLookbackSeconds = getExplicitLookbackSeconds(normalizedQuestion);
+    if (explicitLookbackSeconds !== null && explicitLookbackSeconds > lectureContextLookbackSeconds) {
+      return {
+        isAllowed: false,
+        reason: "distantTimeReference",
+        message: "I can only inspect the current moment and the preceding 10 minutes. Seek closer to that part of the lecture, then ask again."
+      };
+    }
+    if (timestampSeconds > lectureContextLookbackSeconds && hasAmbiguousEarlierReference(normalizedQuestion)) {
+      return {
+        isAllowed: false,
+        reason: "ambiguousEarlierReference",
+        message: "\u201CEarlier in the lecture\u201D is outside the tutor\u2019s reliable scope here. Ask about the last 10 minutes, or seek back to the earlier moment and ask again."
+      };
+    }
+    return { isAllowed: true };
+  }
+
   // src/shared/protocol.ts
-  function isRecord3(value) {
+  function isRecord4(value) {
     return typeof value === "object" && value !== null;
   }
   function isNullableString(value) {
     return typeof value === "string" || value === null;
   }
   function isPlaybackSnapshot(value) {
-    if (!isRecord3(value)) {
+    if (!isRecord4(value)) {
       return false;
     }
     const hasValidDuration = value.duration === null || typeof value.duration === "number" && Number.isFinite(value.duration);
     return typeof value.currentTime === "number" && Number.isFinite(value.currentTime) && hasValidDuration && typeof value.isPaused === "boolean" && typeof value.hasVideo === "boolean" && typeof value.visibleArea === "number" && Number.isFinite(value.visibleArea) && typeof value.capturedAt === "number" && Number.isFinite(value.capturedAt);
   }
   function isContentRequest(value) {
-    if (!isRecord3(value) || typeof value.kind !== "string") {
+    if (!isRecord4(value) || typeof value.kind !== "string") {
       return false;
     }
     switch (value.kind) {
@@ -513,7 +686,10 @@
         return typeof value.seconds === "number" && Number.isFinite(value.seconds);
       }
       case "askTutor": {
-        return isTutorQuestion(value.question);
+        return isTutorQuestion(value.question) && typeof value.lectureTitle === "string";
+      }
+      case "getTutorStatus": {
+        return typeof value.lectureId === "string" && value.lectureId.length > 0;
       }
       default: {
         return false;
@@ -627,6 +803,28 @@
       );
     }
   }
+  async function registerTutorLecture(tabId, documentId, request) {
+    const mediaCandidates = await observedMediaStore.getForTab(tabId, documentId);
+    const selectedMedia = selectPreferredMedia(mediaCandidates, request.question.lectureId);
+    if (selectedMedia === null) {
+      return createErrorResponse(
+        "mediaUnavailable",
+        "Start lecture playback so its authorized recording can be processed automatically."
+      );
+    }
+    const result = await tutorApiClient.registerLecture(
+      request.question.lectureId,
+      request.lectureTitle,
+      selectedMedia.url
+    );
+    if (!result.ok) {
+      return {
+        ok: false,
+        error: result.error
+      };
+    }
+    return { ok: true };
+  }
   function relayPlayback(tabId, frameId, playback) {
     const previous = playbackByTab.get(tabId);
     const shouldReplace = previous === void 0 || previous.frameId === frameId || playback.hasVideo && !previous.playback.hasVideo || !playback.isPaused && previous.playback.isPaused || playback.visibleArea > previous.playback.visibleArea || playback.capturedAt - previous.playback.capturedAt > 2e3;
@@ -673,6 +871,17 @@
         return { ok: true };
       }
       case "askTutor": {
+        const scopeDecision = evaluateQuestionScope(
+          request.question.question,
+          request.question.timestampSeconds
+        );
+        if (!scopeDecision.isAllowed) {
+          return createErrorResponse("questionOutOfScope", scopeDecision.message);
+        }
+        const registration = await registerTutorLecture(tabId, documentId, request);
+        if (!registration.ok) {
+          return registration;
+        }
         const result = await tutorApiClient.ask(request.question);
         if (!result.ok) {
           return {
@@ -683,6 +892,19 @@
         return {
           ok: true,
           data: result.answer
+        };
+      }
+      case "getTutorStatus": {
+        const result = await tutorApiClient.getStatus(request.lectureId);
+        if (!result.ok) {
+          return {
+            ok: false,
+            error: result.error
+          };
+        }
+        return {
+          ok: true,
+          data: result.status
         };
       }
     }

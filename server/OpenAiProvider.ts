@@ -1,10 +1,14 @@
-// Implements the model-provider boundary with OpenAI's multimodal Responses API.
+// Implements answer generation and embeddings with OpenAI's Responses and Embeddings APIs.
 
 import type {
+    EmbeddingRequest,
+    EmbeddingResult,
     ModelAnswer,
     ModelProvider,
     ModelRequest,
-    ModelResult
+    ModelResult,
+    TranscriptionRequest,
+    TranscriptionResult
 } from "./ModelProvider";
 import type { TokenUsage } from "./modelPricing";
 
@@ -259,6 +263,136 @@ export class OpenAiProvider implements ModelProvider
             providerRequestId: typeof responseValue.id === "string" ? responseValue.id : null,
             answer: normalizeModelAnswer(parsedAnswer),
             usage: readUsage(responseValue.usage)
+        };
+    }
+
+    async embed(request: EmbeddingRequest): Promise<EmbeddingResult>
+    {
+        if (this.apiKey.length === 0)
+        {
+            throw new Error("OPENAI_API_KEY is required to create lecture embeddings.");
+        }
+
+        const response = await fetch(`${this.baseUrl}/embeddings`, {
+            method: "POST",
+            headers: {
+                Authorization: `Bearer ${this.apiKey}`,
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                model: request.model,
+                input: request.inputs,
+                encoding_format: "float"
+            }),
+            signal: AbortSignal.timeout(90_000)
+        });
+        const responseValue: unknown = await response.json();
+
+        if (!response.ok)
+        {
+            const errorMessage = isRecord(responseValue)
+                && isRecord(responseValue.error)
+                && typeof responseValue.error.message === "string"
+                ? responseValue.error.message
+                : `OpenAI returned HTTP ${response.status} while creating embeddings.`;
+            throw new Error(errorMessage);
+        }
+
+        if (!isRecord(responseValue) || !Array.isArray(responseValue.data))
+        {
+            throw new Error("OpenAI returned an invalid embedding response.");
+        }
+
+        const indexedVectors = responseValue.data.map((item) =>
+        {
+            if (!isRecord(item)
+                || typeof item.index !== "number"
+                || !Array.isArray(item.embedding)
+                || !item.embedding.every((value) => typeof value === "number" && Number.isFinite(value)))
+            {
+                throw new Error("OpenAI returned an invalid embedding vector.");
+            }
+
+            return {
+                index: item.index,
+                vector: item.embedding as number[]
+            };
+        }).sort((first, second) => first.index - second.index);
+
+        if (indexedVectors.length !== request.inputs.length)
+        {
+            throw new Error("OpenAI returned an unexpected number of embedding vectors.");
+        }
+
+        return {
+            model: typeof responseValue.model === "string" ? responseValue.model : request.model,
+            vectors: indexedVectors.map((item) => item.vector)
+        };
+    }
+
+    async transcribe(request: TranscriptionRequest): Promise<TranscriptionResult>
+    {
+        if (this.apiKey.length === 0)
+        {
+            throw new Error("OPENAI_API_KEY is required to transcribe lecture audio.");
+        }
+
+        const formData = new FormData();
+        const audioBuffer = new ArrayBuffer(request.audio.byteLength);
+        new Uint8Array(audioBuffer).set(request.audio);
+        formData.set("model", request.model);
+        formData.set("response_format", "verbose_json");
+        formData.set("timestamp_granularities[]", "segment");
+        formData.set("file", new Blob([audioBuffer], { type: request.mimeType }), request.filename);
+        const response = await fetch(`${this.baseUrl}/audio/transcriptions`, {
+            method: "POST",
+            headers: {
+                Authorization: `Bearer ${this.apiKey}`
+            },
+            body: formData,
+            signal: AbortSignal.timeout(120_000)
+        });
+        const responseValue: unknown = await response.json();
+
+        if (!response.ok)
+        {
+            const errorMessage = isRecord(responseValue)
+                && isRecord(responseValue.error)
+                && typeof responseValue.error.message === "string"
+                ? responseValue.error.message
+                : `OpenAI returned HTTP ${response.status} while transcribing audio.`;
+            throw new Error(errorMessage);
+        }
+
+        if (!isRecord(responseValue) || !Array.isArray(responseValue.segments))
+        {
+            throw new Error("OpenAI returned an invalid timestamped transcription response.");
+        }
+
+        const segments = responseValue.segments.map((segment) =>
+        {
+            if (!isRecord(segment)
+                || typeof segment.start !== "number"
+                || !Number.isFinite(segment.start)
+                || typeof segment.end !== "number"
+                || !Number.isFinite(segment.end)
+                || segment.end < segment.start
+                || typeof segment.text !== "string"
+                || segment.text.trim().length === 0)
+            {
+                throw new Error("OpenAI returned an invalid transcription segment.");
+            }
+
+            return {
+                startSeconds: segment.start,
+                endSeconds: segment.end,
+                text: segment.text.trim()
+            };
+        });
+
+        return {
+            model: typeof responseValue.model === "string" ? responseValue.model : request.model,
+            segments
         };
     }
 }

@@ -1,6 +1,6 @@
 {
     "name": "blackboard-tutor-extension",
-    "version": "0.3.0",
+    "version": "0.4.0",
     "private": true,
     "description": "A Class.com lecture downloader and context-aware tutoring extension.",
     "scripts": {
@@ -8,7 +8,9 @@
         "check": "npm run typecheck && npm test && npm run build",
         "phase1:costs": "node --env-file-if-exists=.env --import tsx scripts/summarizeCosts.ts",
         "phase1:prepare": "node --import tsx scripts/preparePhase1Evidence.ts",
-        "phase1:server": "node --env-file-if-exists=.env --import tsx server/server.ts",
+        "phase1:server": "npm run phase2:server",
+        "phase2:costs": "node --env-file-if-exists=.env --import tsx scripts/summarizeCosts.ts",
+        "phase2:server": "node --env-file-if-exists=.env --import tsx server/server.ts",
         "test": "tsx --test tests/*.test.ts",
         "typecheck": "tsc --noEmit --pretty false"
     },

@@ -43,7 +43,42 @@ export interface ModelResult
     usage: TokenUsage;
 }
 
+export interface EmbeddingRequest
+{
+    model: string;
+    inputs: string[];
+}
+
+export interface EmbeddingResult
+{
+    model: string;
+    vectors: number[][];
+}
+
+export interface TranscriptionSegment
+{
+    startSeconds: number;
+    endSeconds: number;
+    text: string;
+}
+
+export interface TranscriptionRequest
+{
+    model: string;
+    audio: Buffer;
+    filename: string;
+    mimeType: string;
+}
+
+export interface TranscriptionResult
+{
+    model: string;
+    segments: TranscriptionSegment[];
+}
+
 export interface ModelProvider
 {
     generate(request: ModelRequest): Promise<ModelResult>;
+    embed(request: EmbeddingRequest): Promise<EmbeddingResult>;
+    transcribe(request: TranscriptionRequest): Promise<TranscriptionResult>;
 }

@@ -1,6 +1,8 @@
 // Coordinates lecture identity, playback context, downloads, and sidebar state.
 
 import { detectLectureIdentity, type LectureIdentity } from "../shared/lectureIdentity";
+import { isLectureProcessingStatus } from "../shared/ingestion";
+import { evaluateQuestionScope } from "../shared/questionScope";
 import {
     isBackgroundNotification,
     isBackgroundResponse,
@@ -141,7 +143,9 @@ export class LectureController
         window.setInterval(() =>
         {
             void this.refreshLectureState();
+            void this.refreshTutorStatus();
         }, 5000);
+        void this.refreshTutorStatus();
     }
 
     private installMessageListener(): void
@@ -246,6 +250,33 @@ export class LectureController
         }
     }
 
+    private async refreshTutorStatus(): Promise<void>
+    {
+        const lectureId = this.lectureState.lectureId;
+
+        if (lectureId === null)
+        {
+            this.sidebar.setTutorStatus(null);
+            return;
+        }
+
+        const response = await sendRequest({
+            kind: "getTutorStatus",
+            lectureId
+        });
+
+        if (!response.ok)
+        {
+            this.sidebar.setTutorStatus(null, response.error.message);
+            return;
+        }
+
+        if (isLectureProcessingStatus(response.data))
+        {
+            this.sidebar.setTutorStatus(response.data);
+        }
+    }
+
     private async askQuestion(
         question: string,
         playback: PlaybackSnapshot | null,
@@ -264,6 +295,14 @@ export class LectureController
             return;
         }
 
+        const scopeDecision = evaluateQuestionScope(question, timestamp);
+
+        if (!scopeDecision.isAllowed)
+        {
+            this.sidebar.addMessage("assistant", scopeDecision.message);
+            return;
+        }
+
         if (this.lectureState.lectureId === null)
         {
             this.sidebar.addMessage(
@@ -279,6 +318,7 @@ export class LectureController
         {
             const response = await sendRequest({
                 kind: "askTutor",
+                lectureTitle: getLectureTitle(),
                 question: {
                     lectureId: this.lectureState.lectureId,
                     timestampSeconds: timestamp,
@@ -293,6 +333,7 @@ export class LectureController
             if (!response.ok)
             {
                 this.sidebar.addMessage("assistant", response.error.message);
+                void this.refreshTutorStatus();
                 return;
             }
 
@@ -344,10 +385,14 @@ export class LectureController
         this.latestPlayback = null;
         this.sidebar.setLectureTitle(getLectureTitle());
         this.sidebar.setLectureState(this.lectureState);
+        this.sidebar.setTutorStatus(null);
         this.toolbar.setCanDownload(false);
         void sendRequest({ kind: "resetPageState", changedAt }).then(() =>
         {
             return this.refreshLectureState();
+        }).then(() =>
+        {
+            return this.refreshTutorStatus();
         });
     }
 }

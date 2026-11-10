@@ -2,6 +2,7 @@ node_modules/
 logs/
 phase1-data/*
 !phase1-data/README.md
+phase2-data/
 .env
 *.zip
 dist/*.map

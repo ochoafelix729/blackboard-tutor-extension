@@ -83,6 +83,7 @@ export class MediaStore
             return candidate.documentId === null || candidate.documentId === documentId;
         });
 
+        // If document IDs are unavailable or stale, retain usability with the tab's candidates.
         return documentCandidates.length > 0 ? documentCandidates : [...candidates];
     }
 

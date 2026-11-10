@@ -192,6 +192,7 @@ async function startDownload(
 function relayPlayback(tabId: number, frameId: number, playback: PlaybackSnapshot): void
 {
     const previous = playbackByTab.get(tabId);
+    // Choose the most useful frame's snapshot instead of letting every iframe overwrite it.
     const shouldReplace = previous === undefined
         || previous.frameId === frameId
         || (playback.hasVideo && !previous.playback.hasVideo)
@@ -246,6 +247,7 @@ async function handleContentRequest(
         }
         case "resetPageState":
         {
+            // Navigation invalidates both the old playback winner and old media requests.
             playbackByTab.delete(tabId);
             await observedMediaStore.clearObservedBefore(tabId, request.changedAt);
             return { ok: true };

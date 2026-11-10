@@ -76,6 +76,7 @@ function normalizeCitations(
     evidenceRanges: Map<string, EvidenceRange>
 ): TutorCitation[]
 {
+    // Keep only evidence IDs that were actually retrieved, then derive safe time ranges.
     return citations.flatMap((citation) =>
     {
         const evidenceIds = citation.evidenceIds.filter((id) => evidenceRanges.has(id));

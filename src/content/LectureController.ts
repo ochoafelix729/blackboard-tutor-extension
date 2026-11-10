@@ -188,6 +188,7 @@ export class LectureController
 
     private handlePlayback(playback: PlaybackSnapshot, shouldReport: boolean = true): void
     {
+        // Keep the snapshot from the active-looking player and ignore noisier iframe updates.
         const shouldUsePlayback = this.latestPlayback === null
             || (playback.hasVideo && !this.latestPlayback.hasVideo)
             || (!playback.isPaused && this.latestPlayback.isPaused)
@@ -204,6 +205,7 @@ export class LectureController
 
         if (shouldReport && playback.capturedAt - this.lastPlaybackReportAt >= 1000)
         {
+            // The UI samples frequently, but the background worker only needs one update per second.
             this.lastPlaybackReportAt = playback.capturedAt;
             void sendRequest({
                 kind: "reportPlayback",

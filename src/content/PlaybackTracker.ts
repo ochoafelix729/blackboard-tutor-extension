@@ -18,6 +18,7 @@ function getBestMediaElement(): HTMLMediaElement | null
 
     if (videos.length > 0)
     {
+        // Prefer the video occupying the most visible screen area as the active player.
         return videos.sort((first, second) =>
         {
             return getVisibleArea(second) - getVisibleArea(first);

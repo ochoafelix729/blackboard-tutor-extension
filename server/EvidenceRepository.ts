@@ -171,8 +171,10 @@ function selectTranscript(
 ): TranscriptSegment[]
 {
     const watchedCutoff = timestampSeconds + 15;
+    // Limit retrieval to material already watched, allowing a small cue-boundary tolerance.
     const watchedSegments = segments.filter((segment) => segment.startSeconds <= watchedCutoff);
     const terms = getQuestionTerms(question);
+    // Rank for relevance, then restore lecture order so context reads naturally to the model.
     return watchedSegments
         .map((segment) => ({
             segment,
@@ -306,6 +308,7 @@ export class EvidenceRepository
     ): Promise<RetrievedFrame[]>
     {
         const nearbyFrames = manifest.frames
+            // Do not expose frames materially later than the student's current position.
             .filter((frame) => frame.timestampSeconds <= timestampSeconds + 15)
             .sort((first, second) =>
             {

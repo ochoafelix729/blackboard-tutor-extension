@@ -40,7 +40,9 @@ export interface ExtensionError
         | "signedUrlExpired"
         | "downloadFailed"
         | "tutorUnavailable"
+        | "questionOutOfScope"
         | "evidenceUnavailable"
+        | "lectureProcessing"
         | "modelFailed"
         | "unexpectedError";
     message: string;
@@ -71,6 +73,11 @@ export type contentRequest =
     | {
         kind: "askTutor";
         question: TutorQuestion;
+        lectureTitle: string;
+    }
+    | {
+        kind: "getTutorStatus";
+        lectureId: string;
     };
 
 export type backgroundNotification =
@@ -163,7 +170,11 @@ export function isContentRequest(value: unknown): value is contentRequest
         }
         case "askTutor":
         {
-            return isTutorQuestion(value.question);
+            return isTutorQuestion(value.question) && typeof value.lectureTitle === "string";
+        }
+        case "getTutorStatus":
+        {
+            return typeof value.lectureId === "string" && value.lectureId.length > 0;
         }
         default:
         {

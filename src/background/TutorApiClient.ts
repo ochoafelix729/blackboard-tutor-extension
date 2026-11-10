@@ -1,5 +1,6 @@
-// Calls the local Phase 1 tutor API and validates answers before they enter extension UI state.
+// Calls the local Phase 2 tutor API and validates statuses and answers before they enter extension state.
 
+import { isLectureProcessingStatus, type LectureProcessingStatus } from "../shared/ingestion";
 import { isTutorAnswer, type TutorAnswer, type TutorQuestion } from "../shared/tutor";
 import type { ExtensionError } from "../shared/protocol";
 
@@ -7,6 +8,25 @@ type tutorApiResult =
     | {
         ok: true;
         answer: TutorAnswer;
+    }
+    | {
+        ok: false;
+        error: ExtensionError;
+    };
+
+type tutorStatusResult =
+    | {
+        ok: true;
+        status: LectureProcessingStatus;
+    }
+    | {
+        ok: false;
+        error: ExtensionError;
+    };
+
+type registrationResult =
+    | {
+        ok: true;
     }
     | {
         ok: false;
@@ -32,7 +52,9 @@ function getApiError(value: unknown): ExtensionError | null
 
     const supportedCodes: ExtensionError["code"][] = [
         "invalidRequest",
+        "questionOutOfScope",
         "evidenceUnavailable",
+        "lectureProcessing",
         "modelFailed",
         "unexpectedError"
     ];
@@ -50,6 +72,123 @@ function getApiError(value: unknown): ExtensionError | null
 
 export class TutorApiClient
 {
+    async registerLecture(
+        lectureId: string,
+        title: string,
+        mediaUrl: string
+    ): Promise<registrationResult>
+    {
+        let response: Response;
+
+        try
+        {
+            response = await fetch(`${tutorApiBaseUrl}/v1/lectures/auto-register`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "X-Blackboard-Tutor": "1"
+                },
+                body: JSON.stringify({ lectureId, title, mediaUrl }),
+                signal: AbortSignal.timeout(10_000)
+            });
+        }
+        catch
+        {
+            return {
+                ok: false,
+                error: {
+                    code: "tutorUnavailable",
+                    message: "The local Phase 2 tutor API is not running."
+                }
+            };
+        }
+
+        if (response.ok)
+        {
+            return { ok: true };
+        }
+
+        let responseBody: unknown;
+
+        try
+        {
+            responseBody = await response.json();
+        }
+        catch
+        {
+            responseBody = null;
+        }
+
+        return {
+            ok: false,
+            error: getApiError(responseBody) ?? {
+                code: "unexpectedError",
+                message: "The local tutor API could not begin automatic lecture processing."
+            }
+        };
+    }
+
+    async getStatus(lectureId: string): Promise<tutorStatusResult>
+    {
+        let response: Response;
+
+        try
+        {
+            const query = new URLSearchParams({ lectureId });
+            response = await fetch(`${tutorApiBaseUrl}/v1/lectures/status?${query.toString()}`, {
+                signal: AbortSignal.timeout(5_000)
+            });
+        }
+        catch
+        {
+            return {
+                ok: false,
+                error: {
+                    code: "tutorUnavailable",
+                    message: "The local Phase 2 tutor API is not running."
+                }
+            };
+        }
+
+        let responseBody: unknown;
+
+        try
+        {
+            responseBody = await response.json();
+        }
+        catch
+        {
+            responseBody = null;
+        }
+
+        if (!response.ok)
+        {
+            return {
+                ok: false,
+                error: getApiError(responseBody) ?? {
+                    code: "unexpectedError",
+                    message: "The local tutor API returned an unreadable status error."
+                }
+            };
+        }
+
+        if (!isLectureProcessingStatus(responseBody))
+        {
+            return {
+                ok: false,
+                error: {
+                    code: "unexpectedError",
+                    message: "The local tutor API returned an invalid lecture status."
+                }
+            };
+        }
+
+        return {
+            ok: true,
+            status: responseBody
+        };
+    }
+
     async ask(question: TutorQuestion): Promise<tutorApiResult>
     {
         let response: Response;
@@ -72,7 +211,7 @@ export class TutorApiClient
                 ok: false,
                 error: {
                     code: "tutorUnavailable",
-                    message: "The local tutor API is not running. Start it with npm run phase1:server."
+                    message: "The local tutor API is not running. Start it with npm run phase2:server."
                 }
             };
         }

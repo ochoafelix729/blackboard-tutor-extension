@@ -286,22 +286,41 @@ Consider indexes on `(lecture_id, start_seconds, end_seconds)`, job idempotency 
 - Add transcript timestamps, slide-change detection, semantic segments, and baseline embeddings.
 - Support partial readiness, retries, and reuse without duplicate jobs.
 
-### Phase 3 — Selective multimodal enrichment
-- Add joint audio/video interpretation on difficult segments or on demand.
-- Improve mathematical OCR, multimodal retrieval, and model routing only when benchmarks justify them.
+### Phase 3 — Cloud service and managed access
+- **Status: planned.** Replace the developer-operated local API with a secure multi-user cloud service so extension users do not need to create or supply model-provider API keys.
+- Deploy an authenticated HTTPS API for lecture registration, media transfer, processing status, tutor questions, citations, and usage status.
+- Authenticate users to the Blackboard Tutor service and issue short-lived application session tokens. A user session must never receive, select, lease, or directly use a model-provider credential.
+- Use one project service-account credential initially, stored only in a managed secret store and available only to the cloud API and workers. Add credential rotation and least-privilege access. Additional credentials are for operational rotation or isolation, not for assigning one provider key to each active user session.
+- Add a durable relational database for users, sessions, lecture access, processing jobs, artifact metadata, idempotency keys, budget reservations, and finalized usage entries.
+- Add encrypted object storage for authorized source media and derived artifacts, with explicit retention periods and deletion jobs.
+- Run ingestion and answer generation through a durable job queue with bounded retries, leases, global concurrency limits, and per-user/session rate limits.
+- Implement an application-owned shared credit balance. Before starting billable work, atomically reserve a conservative maximum cost; reject the request when the available balance cannot cover the reservation. After completion, settle the reservation against recorded provider usage and return unused credit. Failed or indeterminate jobs must resolve their reservation through an explicit reconciliation path.
+- Configure provider-side spend alerts and a hard project spend limit as defense in depth. The application budget ledger remains the immediate request gate because alerts do not stop traffic and provider enforcement may not provide request-level reservation semantics.
+- Return a clear service-unavailable or credits-exhausted state when shared credit reaches zero. Do not silently fall back to a user-supplied key.
+- Add abuse controls, request-size limits, audit events that exclude lecture content and secrets, operational health monitoring, and an emergency global kill switch for new billable work.
+- Define and test the consented browser-to-cloud media handoff without sending signed media URLs, browser cookies, or session credentials to model providers.
+- Deploy separate development and production environments with isolated databases, object storage, provider projects, credentials, and spending controls.
 
-### Phase 4 — Product polish and expansion
-- Chat history, exportable notes, guided practice, broader player support, privacy controls, observability, and sustainable pricing.
+**Credential design decision:** Do not build a pool that leases provider API keys to user sessions. Provider credentials identify the server application and stay behind the cloud boundary; application sessions, authorization, rate limits, and credit accounting provide user isolation. OpenAI recommends project service accounts for application identity and keeping credentials in environment variables or a secret-management service.
+
+**Initial budget behavior:** The shared credit ledger is a product-level allowance, not a claim that each provider key has a separate balance. When available credit reaches zero—or is fully reserved by in-flight jobs—the service rejects new billable work. A later phase can replace this shared allowance with per-user plans, grants, or paid usage without changing provider credential handling.
+
+### Phase 4 — Product polish, multimodal refinement, and expansion
+- Improve mathematical OCR, selective joint audio/video interpretation, multimodal retrieval, and model routing only when benchmarks justify them.
+- Add chat history, exportable notes, guided practice, broader player support, stronger privacy controls, observability, and a sustainable per-user cost model.
+- Refine the Phase 3 authentication, budget, abuse-prevention, retention, and operational workflows using production evidence.
 
 ## 12. Open architectural decisions
 
 These are **not finalized**; future work should explicitly resolve them:
 
-1. **Processing location:** local-first, cloud-first, or hybrid? Current inclination: **hybrid**, but prove the data-transfer and security model first.
+1. **Processing location:** Phase 3 targets a **cloud-first service** for managed credentials, shared processing, and multi-user operation. Preserve a local development mode, but do not require it for extension users.
 2. **Processing trigger:** on page open, first question, or explicit opt-in? Current inclination: **first question/consent**, with current-playback prioritized.
-4. **Media acquisition:** which authorized stream(s) are accessible and how can they be transferred or processed without relying on expiring browser URLs?
-5. **Transcript sources:** does Class.com expose accessible captions/transcripts that could make ASR unnecessary? From what I've seen, it does, but I'm not certain if this is configurable per class/lecture/university, so my current inclination is: Look for available transcription - if not available, resort to ASR.
-6. **Multimodal coverage:** full lecture, selected segments, or on-demand only? Current inclination: **selected/on-demand**.
-7. **Index ownership:** private per user initially versus access-controlled shared processing across students? I think in the future, access-controlled shared processing would reduce our costs dramatically.
-9. **Retention:** how long to retain original media, frames, transcripts, and conversations?
-10. **Deployment and pricing:** which features stay local/free versus metered/cloud-backed?
+3. **Media acquisition:** which authorized stream(s) are accessible and how can they be transferred or processed without relying on expiring browser URLs?
+4. **Transcript sources:** does Class.com expose accessible captions/transcripts that could make ASR unnecessary? From what I've seen, it does, but I'm not certain if this is configurable per class/lecture/university, so my current inclination is: Look for available transcription - if not available, resort to ASR.
+5. **Multimodal coverage:** full lecture, selected segments, or on-demand only? Current inclination: **selected/on-demand**.
+6. **Index ownership:** private per user initially versus access-controlled shared processing across students? I think in the future, access-controlled shared processing would reduce our costs dramatically.
+7. **Retention:** how long to retain original media, frames, transcripts, and conversations?
+8. **Session identity:** which authentication method should the extension use, and how are sessions revoked across devices?
+9. **Shared-credit administration:** how is credit funded, who can adjust it, how are stale reservations reconciled, and what operational threshold should stop new work before the provider limit is reached?
+10. **Deployment and pricing:** which features stay free versus metered or subscription-backed after the initial shared allowance?

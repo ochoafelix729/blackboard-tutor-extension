@@ -10,6 +10,7 @@ import {
     type LectureState,
     type PlaybackSnapshot
 } from "../shared/protocol";
+import { isTutorAnswer, type tutorStrategy } from "../shared/tutor";
 import { PlaybackTracker } from "./PlaybackTracker";
 import { SidebarView } from "./SidebarView";
 import { ToolbarController } from "./ToolbarController";
@@ -100,9 +101,9 @@ export class LectureController
             {
                 void this.startDownload();
             },
-            onQuestion: (question, playback) =>
+            onQuestion: (question, playback, strategy) =>
             {
-                this.captureQuestion(question, playback);
+                void this.askQuestion(question, playback, strategy);
             },
             onSeek: (seconds) =>
             {
@@ -136,11 +137,11 @@ export class LectureController
         window.setInterval(() =>
         {
             this.checkForNavigation();
-        }, 1_000);
+        }, 1000);
         window.setInterval(() =>
         {
             void this.refreshLectureState();
-        }, 5_000);
+        }, 5000);
     }
 
     private installMessageListener(): void
@@ -187,11 +188,12 @@ export class LectureController
 
     private handlePlayback(playback: PlaybackSnapshot, shouldReport: boolean = true): void
     {
+        // Keep the snapshot from the active-looking player and ignore noisier iframe updates.
         const shouldUsePlayback = this.latestPlayback === null
             || (playback.hasVideo && !this.latestPlayback.hasVideo)
             || (!playback.isPaused && this.latestPlayback.isPaused)
             || playback.visibleArea >= this.latestPlayback.visibleArea
-            || playback.capturedAt - this.latestPlayback.capturedAt > 2_000;
+            || playback.capturedAt - this.latestPlayback.capturedAt > 2000;
 
         if (!shouldUsePlayback)
         {
@@ -201,8 +203,9 @@ export class LectureController
         this.latestPlayback = playback;
         this.sidebar.setPlayback(playback);
 
-        if (shouldReport && playback.capturedAt - this.lastPlaybackReportAt >= 1_000)
+        if (shouldReport && playback.capturedAt - this.lastPlaybackReportAt >= 1000)
         {
+            // The UI samples frequently, but the background worker only needs one update per second.
             this.lastPlaybackReportAt = playback.capturedAt;
             void sendRequest({
                 kind: "reportPlayback",
@@ -243,19 +246,71 @@ export class LectureController
         }
     }
 
-    private captureQuestion(question: string, playback: PlaybackSnapshot | null): void
+    private async askQuestion(
+        question: string,
+        playback: PlaybackSnapshot | null,
+        strategy: tutorStrategy
+    ): Promise<void>
     {
         const timestamp = playback?.currentTime ?? this.latestPlayback?.currentTime;
         this.sidebar.addMessage("user", question, timestamp);
 
-        const contextDescription = timestamp === undefined
-            ? "I saved your question, but no player timestamp is available yet."
-            : "I saved your question with the current playback time.";
-        this.sidebar.addMessage(
-            "assistant",
-            `${contextDescription} Grounded lecture answers will be connected in Phase 1.`,
-            timestamp
-        );
+        if (timestamp === undefined)
+        {
+            this.sidebar.addMessage(
+                "assistant",
+                "Start or pause the lecture so I can attach a playback timestamp, then ask again."
+            );
+            return;
+        }
+
+        if (this.lectureState.lectureId === null)
+        {
+            this.sidebar.addMessage(
+                "assistant",
+                "I could not identify this lecture yet. Start playback or reload the recording, then ask again."
+            );
+            return;
+        }
+
+        this.sidebar.setTutorBusy(true);
+
+        try
+        {
+            const response = await sendRequest({
+                kind: "askTutor",
+                question: {
+                    lectureId: this.lectureState.lectureId,
+                    timestampSeconds: timestamp,
+                    question,
+                    strategy,
+                    currentFrameDataUrl: strategy === "multimodal"
+                        ? this.tracker.captureCurrentFrame()
+                        : null
+                }
+            });
+
+            if (!response.ok)
+            {
+                this.sidebar.addMessage("assistant", response.error.message);
+                return;
+            }
+
+            if (!isTutorAnswer(response.data))
+            {
+                this.sidebar.addMessage(
+                    "assistant",
+                    "The tutor returned an invalid answer. Check the local API and try again."
+                );
+                return;
+            }
+
+            this.sidebar.addTutorAnswer(response.data);
+        }
+        finally
+        {
+            this.sidebar.setTutorBusy(false);
+        }
     }
 
     private seek(seconds: number): void

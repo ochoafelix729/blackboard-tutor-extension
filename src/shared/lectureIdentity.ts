@@ -176,6 +176,7 @@ function createPageIdentity(pageUrl: URL): LectureIdentity
 
 export function detectLectureIdentity(pageUrl: URL, root: ParentNode): LectureIdentity
 {
+    // Prefer durable platform IDs; use the query-free page hash only as a last resort.
     const candidates = [
         getQueryCandidate(pageUrl),
         getPathCandidate(pageUrl),

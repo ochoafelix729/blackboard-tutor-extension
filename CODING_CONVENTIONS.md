@@ -271,6 +271,8 @@ function getRequestOptions(lectureId: string): { lectureId: string }
 
 Use `async`/`await` for ordinary promise-based flows. Catch errors where recovery or meaningful reporting is possible, not merely to hide them.
 
+Functions that directly return an existing Promise or manually construct a Promise do not require the async keyword. All asynchronous functions should explicitly declare their Promise<T> return type.
+
 ```ts
 async function initializeLecture(lectureId: string): Promise<void>
 {

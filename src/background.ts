@@ -2,12 +2,14 @@
 
 import { DownloadManager } from "./background/DownloadManager";
 import { MediaStore } from "./background/MediaStore";
+import { TutorApiClient } from "./background/TutorApiClient";
 import { isMediaExpired, parseObservedMedia, selectPreferredMedia } from "./shared/media";
 import {
     isContentRequest,
     type backgroundNotification,
     type backgroundResponse,
     type contentRequest,
+    type ExtensionError,
     type LectureState,
     type MediaOption,
     type PlaybackSnapshot
@@ -15,6 +17,7 @@ import {
 
 const observedMediaStore = new MediaStore();
 const lectureDownloadManager = new DownloadManager();
+const tutorApiClient = new TutorApiClient();
 interface TabPlayback
 {
     frameId: number;
@@ -24,7 +27,7 @@ interface TabPlayback
 const playbackByTab = new Map<number, TabPlayback>();
 
 function createErrorResponse(
-    code: "invalidRequest" | "mediaUnavailable" | "signedUrlExpired" | "downloadFailed" | "unexpectedError",
+    code: ExtensionError["code"],
     message: string
 ): backgroundResponse
 {
@@ -189,6 +192,7 @@ async function startDownload(
 function relayPlayback(tabId: number, frameId: number, playback: PlaybackSnapshot): void
 {
     const previous = playbackByTab.get(tabId);
+    // Choose the most useful frame's snapshot instead of letting every iframe overwrite it.
     const shouldReplace = previous === undefined
         || previous.frameId === frameId
         || (playback.hasVideo && !previous.playback.hasVideo)
@@ -243,6 +247,7 @@ async function handleContentRequest(
         }
         case "resetPageState":
         {
+            // Navigation invalidates both the old playback winner and old media requests.
             playbackByTab.delete(tabId);
             await observedMediaStore.clearObservedBefore(tabId, request.changedAt);
             return { ok: true };
@@ -257,6 +262,23 @@ async function handleContentRequest(
                 void chrome.runtime.lastError;
             });
             return { ok: true };
+        }
+        case "askTutor":
+        {
+            const result = await tutorApiClient.ask(request.question);
+
+            if (!result.ok)
+            {
+                return {
+                    ok: false,
+                    error: result.error
+                };
+            }
+
+            return {
+                ok: true,
+                data: result.answer
+            };
         }
     }
 }

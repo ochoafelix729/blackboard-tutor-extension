@@ -1,6 +1,7 @@
 // Renders the isolated tutor sidebar and forwards user interactions.
 
 import type { downloadStatus, LectureState, PlaybackSnapshot } from "../shared/protocol";
+import type { TutorAnswer, tutorStrategy } from "../shared/tutor";
 import {
     clampSidebarWidth,
     getDefaultSidebarWidth,
@@ -10,7 +11,7 @@ import {
 export interface SidebarCallbacks
 {
     onDownload(): void;
-    onQuestion(question: string, playback: PlaybackSnapshot | null): void;
+    onQuestion(question: string, playback: PlaybackSnapshot | null, strategy: tutorStrategy): void;
     onSeek(seconds: number): void;
 }
 
@@ -33,6 +34,7 @@ const sidebarMarkup = `
         }
 
         button,
+        select,
         textarea {
             font: inherit;
         }
@@ -190,6 +192,22 @@ const sidebarMarkup = `
             white-space: nowrap;
         }
 
+        .lecture-id {
+            min-width: 0;
+            max-width: 100%;
+            padding: 0;
+            overflow: hidden;
+            color: #68748a;
+            background: transparent;
+            border: 0;
+            cursor: copy;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-size: 10px;
+            text-align: left;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
         .download {
             flex: none;
             padding: 7px 10px;
@@ -242,8 +260,8 @@ const sidebarMarkup = `
         }
 
         .timestamp {
-            display: block;
-            margin-top: 7px;
+            display: inline-block;
+            margin: 7px 8px 0 0;
             padding: 0;
             color: inherit;
             background: transparent;
@@ -303,6 +321,61 @@ const sidebarMarkup = `
             font-weight: 700;
         }
 
+        .ask:disabled {
+            cursor: not-allowed;
+            opacity: 0.65;
+        }
+
+        textarea:disabled,
+        select:disabled {
+            cursor: wait;
+            opacity: 0.65;
+        }
+
+        .strategy {
+            max-width: 170px;
+            padding: 6px 8px;
+            color: #263247;
+            background: #ffffff;
+            border: 1px solid #cbd2df;
+            border-radius: 7px;
+            font-size: 11px;
+        }
+
+        .consent {
+            display: flex;
+            align-items: flex-start;
+            gap: 7px;
+            margin-top: 9px;
+            color: #596579;
+            font-size: 10px;
+            line-height: 1.35;
+        }
+
+        .consent input {
+            flex: none;
+            margin: 2px 0 0;
+        }
+
+        .answer-text,
+        .limitations,
+        .trace {
+            margin: 0;
+        }
+
+        .limitations {
+            margin-top: 8px;
+            color: #596579;
+            font-size: 11px;
+        }
+
+        .trace {
+            margin-top: 8px;
+            color: #68748a;
+            font-size: 10px;
+            font-variant-numeric: tabular-nums;
+        }
+
     </style>
     <button class="launcher" type="button" aria-label="Open lecture tutor" hidden>Tutor</button>
     <aside class="panel" aria-label="Lecture tutor">
@@ -329,13 +402,33 @@ const sidebarMarkup = `
             <div class="context-row">
                 <span class="media-status">Waiting for authorized media…</span>
             </div>
+            <div class="context-row">
+                <input
+                    class="lecture-id"
+                    type="text"
+                    value="Lecture ID pending"
+                    aria-label="Stable lecture ID"
+                    title="Select and copy the stable lecture ID"
+                    readonly
+                >
+            </div>
         </section>
         <div class="messages" role="log" aria-live="polite"></div>
         <form class="composer">
             <textarea aria-label="Ask about this lecture" placeholder="Ask about what the professor is explaining…" required></textarea>
+            <label class="consent">
+                <input type="checkbox" class="consent-input">
+                <span>Send retrieved lecture evidence—including frames when selected—to the configured AI provider.</span>
+            </label>
             <div class="composer-row">
-                <span class="hint">Your playback time is attached</span>
+                <select class="strategy" aria-label="Tutor evidence strategy">
+                    <option value="transcriptOnly">Transcript only</option>
+                    <option value="multimodal">Transcript + visuals</option>
+                </select>
                 <button class="ask" type="submit">Ask</button>
+            </div>
+            <div class="composer-row">
+                <span class="hint">Playback time and estimated API cost are attached</span>
             </div>
         </form>
     </aside>
@@ -402,14 +495,19 @@ export class SidebarView
     private readonly lectureTitle: HTMLElement;
     private readonly time: HTMLElement;
     private readonly mediaStatus: HTMLElement;
+    private readonly lectureId: HTMLInputElement;
     private readonly downloadButton: HTMLButtonElement;
     private readonly messages: HTMLElement;
     private readonly form: HTMLFormElement;
     private readonly textarea: HTMLTextAreaElement;
+    private readonly strategy: HTMLSelectElement;
+    private readonly askButton: HTMLButtonElement;
+    private readonly consentInput: HTMLInputElement;
     private playback: PlaybackSnapshot | null = null;
     private isOpen = true;
     private sidebarWidth = getDefaultSidebarWidth(window.innerWidth);
     private activeResizePointerId: number | null = null;
+    private isTutorBusy = false;
     private resizeStartX = 0;
     private resizeStartWidth = 0;
 
@@ -427,10 +525,14 @@ export class SidebarView
         this.lectureTitle = requireElement(shadowRoot, ".lecture-title");
         this.time = requireElement(shadowRoot, ".time");
         this.mediaStatus = requireElement(shadowRoot, ".media-status");
+        this.lectureId = requireElement(shadowRoot, ".lecture-id");
         this.downloadButton = requireElement(shadowRoot, ".download");
         this.messages = requireElement(shadowRoot, ".messages");
         this.form = requireElement(shadowRoot, ".composer");
         this.textarea = requireElement(shadowRoot, "textarea");
+        this.strategy = requireElement(shadowRoot, ".strategy");
+        this.askButton = requireElement(shadowRoot, ".ask");
+        this.consentInput = requireElement(shadowRoot, ".consent-input");
 
         requireElement<HTMLButtonElement>(shadowRoot, ".close").addEventListener("click", () =>
         {
@@ -444,10 +546,35 @@ export class SidebarView
         {
             this.callbacks.onDownload();
         });
+        this.lectureId.addEventListener("click", () =>
+        {
+            const lectureId = this.lectureId.value;
+            this.lectureId.select();
+
+            if (this.lectureId.dataset.isAvailable === "true" && navigator.clipboard !== undefined)
+            {
+                void navigator.clipboard.writeText(lectureId).then(() =>
+                {
+                    this.lectureId.value = "Lecture ID copied";
+                    window.setTimeout(() =>
+                    {
+                        this.lectureId.value = lectureId;
+                        this.lectureId.select();
+                    }, 1_200);
+                }).catch(() =>
+                {
+                    this.lectureId.title = "Clipboard permission was denied";
+                });
+            }
+        });
         this.form.addEventListener("submit", (event) =>
         {
             event.preventDefault();
             this.submitQuestion();
+        });
+        this.consentInput.addEventListener("change", () =>
+        {
+            this.updateAskAvailability();
         });
         this.textarea.addEventListener("keydown", (event) =>
         {
@@ -493,6 +620,7 @@ export class SidebarView
         document.documentElement.append(this.host);
         installPageLayoutStyle();
         this.applySidebarWidth(this.sidebarWidth);
+        this.updateAskAvailability();
         this.addMessage(
             "assistant",
             "I’m tracking the lecture’s playback position. Ask a question to capture it with the current timestamp."
@@ -520,6 +648,21 @@ export class SidebarView
 
     setLectureState(state: LectureState): void
     {
+        const lectureId = state.lectureId ?? "Lecture ID unavailable";
+        this.lectureId.value = lectureId;
+        this.lectureId.title = state.lectureId === null
+            ? "A stable lecture ID has not been detected"
+            : "Copy the stable lecture ID";
+
+        if (state.lectureId === null)
+        {
+            delete this.lectureId.dataset.isAvailable;
+        }
+        else
+        {
+            this.lectureId.dataset.isAvailable = "true";
+        }
+
         this.downloadButton.disabled = !state.canDownload;
 
         if (state.canDownload)
@@ -569,6 +712,65 @@ export class SidebarView
 
         this.messages.append(message);
         this.messages.scrollTop = this.messages.scrollHeight;
+    }
+
+    addTutorAnswer(answer: TutorAnswer): void
+    {
+        const message = document.createElement("div");
+        message.className = "message assistant";
+
+        const answerText = document.createElement("p");
+        answerText.className = "answer-text";
+        answerText.textContent = answer.answer;
+        message.append(answerText);
+
+        for (const citation of answer.citations)
+        {
+            const timestamp = document.createElement("button");
+            timestamp.type = "button";
+            timestamp.className = "timestamp";
+            timestamp.textContent = `Jump to ${formatTime(citation.startSeconds)}`;
+            timestamp.title = `Evidence: ${citation.evidenceIds.join(", ")}`;
+            timestamp.addEventListener("click", () =>
+            {
+                this.callbacks.onSeek(citation.startSeconds);
+            });
+            message.append(timestamp);
+        }
+
+        if (answer.limitations.length > 0)
+        {
+            const limitations = document.createElement("p");
+            limitations.className = "limitations";
+            limitations.textContent = `Limitations: ${answer.limitations.join(" ")}`;
+            message.append(limitations);
+        }
+
+        const trace = document.createElement("p");
+        trace.className = "trace";
+        const cost = answer.cost.estimatedCostUsd === null
+            ? "cost unpriced"
+            : `est. $${answer.cost.estimatedCostUsd.toFixed(6)}`;
+        trace.textContent = [
+            answer.cost.model,
+            `${answer.cost.inputTokens} in / ${answer.cost.outputTokens} out`,
+            cost,
+            `trace ${answer.cost.traceId.slice(0, 8)}`
+        ].join(" · ");
+        message.append(trace);
+
+        this.messages.append(message);
+        this.messages.scrollTop = this.messages.scrollHeight;
+    }
+
+    setTutorBusy(isBusy: boolean): void
+    {
+        this.isTutorBusy = isBusy;
+        this.textarea.disabled = isBusy;
+        this.strategy.disabled = isBusy;
+        this.consentInput.disabled = isBusy;
+        this.askButton.textContent = isBusy ? "Thinking…" : "Ask";
+        this.updateAskAvailability();
     }
 
     private setOpen(isOpen: boolean): void
@@ -692,12 +894,23 @@ export class SidebarView
     {
         const question = this.textarea.value.trim();
 
-        if (question.length === 0)
+        if (question.length === 0 || !this.consentInput.checked || this.isTutorBusy)
         {
             return;
         }
 
         this.textarea.value = "";
-        this.callbacks.onQuestion(question, this.playback);
+        const strategy = this.strategy.value === "transcriptOnly"
+            ? "transcriptOnly"
+            : "multimodal";
+        this.callbacks.onQuestion(question, this.playback, strategy);
+    }
+
+    private updateAskAvailability(): void
+    {
+        this.askButton.disabled = this.isTutorBusy || !this.consentInput.checked;
+        this.askButton.title = this.consentInput.checked
+            ? "Ask about the current lecture moment"
+            : "Confirm evidence sharing before asking";
     }
 }

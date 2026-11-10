@@ -18,6 +18,7 @@ function getBestMediaElement(): HTMLMediaElement | null
 
     if (videos.length > 0)
     {
+        // Prefer the video occupying the most visible screen area as the active player.
         return videos.sort((first, second) =>
         {
             return getVisibleArea(second) - getVisibleArea(first);
@@ -83,6 +84,41 @@ export class PlaybackTracker
         mediaElement.currentTime = Math.max(0, Math.min(seconds, maximum));
         this.capture();
         return true;
+    }
+
+    captureCurrentFrame(): string | null
+    {
+        const mediaElement = getBestMediaElement();
+
+        if (!(mediaElement instanceof HTMLVideoElement)
+            || mediaElement.readyState < HTMLMediaElement.HAVE_CURRENT_DATA
+            || mediaElement.videoWidth <= 0
+            || mediaElement.videoHeight <= 0)
+        {
+            return null;
+        }
+
+        const maximumWidth = 960;
+        const scale = Math.min(1, maximumWidth / mediaElement.videoWidth);
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.round(mediaElement.videoWidth * scale));
+        canvas.height = Math.max(1, Math.round(mediaElement.videoHeight * scale));
+        const context = canvas.getContext("2d");
+
+        if (context === null)
+        {
+            return null;
+        }
+
+        try
+        {
+            context.drawImage(mediaElement, 0, 0, canvas.width, canvas.height);
+            return canvas.toDataURL("image/jpeg", 0.72);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private capture(): void

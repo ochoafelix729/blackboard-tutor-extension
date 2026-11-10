@@ -53,7 +53,7 @@ function reportFramePlayback(): void
     let lastReportAt = 0;
     const tracker = new PlaybackTracker((playback) =>
     {
-        if (playback.capturedAt - lastReportAt < 1_000)
+        if (playback.capturedAt - lastReportAt < 1000)
         {
             return;
         }

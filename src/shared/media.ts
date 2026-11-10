@@ -192,6 +192,7 @@ export function selectPreferredMedia(
     now: number = Date.now()
 ): ObservedMedia | null
 {
+    // Prefer shared-screen video, then fall back by media kind and observation recency.
     return mediaCandidates
         .filter((candidate) =>
         {

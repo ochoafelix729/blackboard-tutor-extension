@@ -166,8 +166,6 @@ const getLectureId = (url: URL): string | null =>
 
 Prefer explicit return types on exported functions, async functions, and public methods. Let TypeScript infer obvious local variable types.
 
-Use async and await for Promise-based asynchronous operations when awaiting results or handling subsequent logic. Functions that directly return an existing Promise or manually construct a Promise do not require the async keyword. Avoid redundant async declarations solely for stylistic consistency. All asynchronous functions should explicitly declare their Promise<T> return type.
-
 ## 5. Identifier naming
 
 Use camelCase for ordinary project-controlled identifiers and PascalCase for project-controlled classes and interfaces. A source file whose primary export is a class or interface uses the same PascalCase name; other source filenames use camelCase. Type aliases and enums remain camelCase. **This is a deliberate project preference.**
@@ -272,6 +270,8 @@ function getRequestOptions(lectureId: string): { lectureId: string }
 ## 8. Async operations, failures, and logging
 
 Use `async`/`await` for ordinary promise-based flows. Catch errors where recovery or meaningful reporting is possible, not merely to hide them.
+
+Functions that directly return an existing Promise or manually construct a Promise do not require the async keyword. All asynchronous functions should explicitly declare their Promise<T> return type.
 
 ```ts
 async function initializeLecture(lectureId: string): Promise<void>

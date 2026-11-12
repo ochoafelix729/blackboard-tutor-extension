@@ -103,19 +103,6 @@ async function startDownload(
     }
 }
 
-async function askTutor(
-    tabId: number,
-    request: Extract<contentRequest, { kind: "askTutor" }>
-): Promise<backgroundResponse>
-{
-    const registration = await prepareTutor(tabId, {
-        kind: "prepareTutor",
-        lectureId: request.question.lectureId,
-        lectureTitle: request.lectureTitle
-    });
-    return registration.ok ? tutorApiClient.ask(request.question) : registration;
-}
-
 async function prepareTutor(
     tabId: number,
     request: Extract<contentRequest, { kind: "prepareTutor" }>
@@ -157,13 +144,13 @@ async function handleContentRequest(
         {
             return startDownload(tabId, request);
         }
-        case "askTutor":
-        {
-            return askTutor(tabId, request);
-        }
         case "prepareTutor":
         {
             return prepareTutor(tabId, request);
+        }
+        case "askTutor":
+        {
+            return createErrorResponse("invalidRequest", "Tutor questions require a streaming connection.");
         }
         case "getTutorStatus":
         {
@@ -171,6 +158,64 @@ async function handleContentRequest(
         }
     }
 }
+
+chrome.runtime.onConnect.addListener((port) =>
+{
+    if (port.name !== "tutorStream")
+    {
+        return;
+    }
+
+    const abortController = new AbortController();
+    port.onDisconnect.addListener(() =>
+    {
+        abortController.abort();
+    });
+    port.onMessage.addListener((request: Extract<contentRequest, { kind: "askTutor" }>) =>
+    {
+        void (async () =>
+        {
+            const tabId = port.sender?.tab?.id;
+
+            if (tabId === undefined)
+            {
+                port.postMessage({ kind: "error", error: { code: "invalidRequest", message: "The request is not associated with a browser tab." } });
+                return;
+            }
+
+            const registration = await prepareTutor(tabId, {
+                kind: "prepareTutor",
+                lectureId: request.question.lectureId,
+                lectureTitle: request.lectureTitle
+            });
+
+            if (abortController.signal.aborted)
+            {
+                return;
+            }
+
+            if (!registration.ok)
+            {
+                port.postMessage({ kind: "error", error: registration.error });
+                return;
+            }
+
+            await tutorApiClient.streamAnswer(request.question, (event) =>
+            {
+                if (!abortController.signal.aborted)
+                {
+                    port.postMessage(event);
+                }
+            }, abortController.signal);
+        })().catch(() =>
+        {
+            if (!abortController.signal.aborted)
+            {
+                port.postMessage({ kind: "error", error: { code: "unexpectedError", message: "The extension could not complete the request." } });
+            }
+        });
+    });
+});
 
 chrome.runtime.onMessage.addListener((message: contentRequest, sender, sendResponse) =>
 {

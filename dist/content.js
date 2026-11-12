@@ -35006,10 +35006,18 @@
       this.messages.append(message);
       this.messages.scrollTop = this.messages.scrollHeight;
     }
-    addTutorAnswer(answer) {
+    startTutorAnswer() {
       const message = document.createElement("div");
       message.className = "message assistant";
-      message.append(renderAnswer(answer.answer));
+      this.messages.append(message);
+      return message;
+    }
+    updateTutorAnswer(message, text3) {
+      message.replaceChildren(renderAnswer(text3));
+      this.messages.scrollTop = this.messages.scrollHeight;
+    }
+    finishTutorAnswer(message, answer) {
+      this.updateTutorAnswer(message, answer.answer);
       for (const citation of answer.citations) {
         const timestamp = document.createElement("button");
         timestamp.type = "button";
@@ -35027,7 +35035,6 @@
         limitations.textContent = `Limitations: ${answer.limitations.join(" ")}`;
         message.append(limitations);
       }
-      this.messages.append(message);
       this.messages.scrollTop = this.messages.scrollHeight;
     }
     setTutorBusy(isBusy) {
@@ -35373,7 +35380,7 @@
       }
       this.sidebar.setTutorBusy(true);
       try {
-        const response = await sendRequest({
+        const request = {
           kind: "askTutor",
           lectureTitle: getLectureTitle(),
           question: {
@@ -35382,13 +35389,38 @@
             question,
             currentFrameDataUrl: this.tracker.captureCurrentFrame()
           }
+        };
+        const port = chrome.runtime.connect({ name: "tutorStream" });
+        let message = null;
+        await new Promise((resolve) => {
+          let finished = false;
+          port.onMessage.addListener((event) => {
+            if (event.kind === "text") {
+              message ??= this.sidebar.startTutorAnswer();
+              this.sidebar.updateTutorAnswer(message, event.text);
+            } else {
+              finished = true;
+              if (event.kind === "complete") {
+                message ??= this.sidebar.startTutorAnswer();
+                this.sidebar.finishTutorAnswer(message, event.answer);
+              } else {
+                this.sidebar.addMessage("assistant", message === null ? event.error.message : `The response above is incomplete. ${event.error.message}`);
+                void this.refreshTutorStatus();
+              }
+              port.disconnect();
+              resolve();
+            }
+          });
+          port.onDisconnect.addListener(() => {
+            if (!finished) {
+              this.sidebar.addMessage("assistant", "The tutor response was interrupted. Please try again.");
+              resolve();
+            }
+          });
+          port.postMessage(request);
         });
-        if (!response.ok) {
-          this.sidebar.addMessage("assistant", response.error.message);
-          void this.refreshTutorStatus();
-          return;
-        }
-        this.sidebar.addTutorAnswer(response.data);
+      } catch {
+        this.sidebar.addMessage("assistant", "The extension service is temporarily unavailable. Please try again.");
       } finally {
         this.sidebar.setTutorBusy(false);
       }

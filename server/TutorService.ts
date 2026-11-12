@@ -116,7 +116,7 @@ export class TutorService
         this.provider = provider;
     }
 
-    async answer(question: TutorQuestion): Promise<TutorAnswer>
+    async answer(question: TutorQuestion, onText: (text: string) => void = () => {}, signal?: AbortSignal): Promise<TutorAnswer>
     {
         const scopeDecision = evaluateQuestionScope(question.question, question.timestampSeconds);
 
@@ -211,7 +211,7 @@ export class TutorService
                 images,
                 reasoningEffort: this.config.reasoningEffort,
                 maxOutputTokens: this.config.maxOutputTokens
-            });
+            }, onText, signal);
             const evidenceRanges = createEvidenceRanges(evidence, question, hasCurrentFrame);
             const citations = normalizeCitations(result.citations, evidenceRanges);
             const limitations = [...result.limitations];

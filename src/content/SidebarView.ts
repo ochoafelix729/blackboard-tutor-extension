@@ -743,12 +743,23 @@ export class SidebarView
         this.messages.scrollTop = this.messages.scrollHeight;
     }
 
-    addTutorAnswer(answer: TutorAnswer): void
+    startTutorAnswer(): HTMLElement
     {
         const message = document.createElement("div");
         message.className = "message assistant";
+        this.messages.append(message);
+        return message;
+    }
 
-        message.append(renderAnswer(answer.answer));
+    updateTutorAnswer(message: HTMLElement, text: string): void
+    {
+        message.replaceChildren(renderAnswer(text));
+        this.messages.scrollTop = this.messages.scrollHeight;
+    }
+
+    finishTutorAnswer(message: HTMLElement, answer: TutorAnswer): void
+    {
+        this.updateTutorAnswer(message, answer.answer);
 
         for (const citation of answer.citations)
         {
@@ -772,7 +783,6 @@ export class SidebarView
             message.append(limitations);
         }
 
-        this.messages.append(message);
         this.messages.scrollTop = this.messages.scrollHeight;
     }
 

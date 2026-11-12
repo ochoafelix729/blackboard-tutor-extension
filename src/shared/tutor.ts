@@ -22,6 +22,11 @@ export interface TutorAnswer
     limitations: string[];
 }
 
+export type tutorStreamEvent =
+    | { kind: "text"; text: string }
+    | { kind: "complete"; answer: TutorAnswer }
+    | { kind: "error"; error: import("./protocol").ExtensionError };
+
 function isRecord(value: unknown): value is Record<string, unknown>
 {
     return typeof value === "object" && value !== null;

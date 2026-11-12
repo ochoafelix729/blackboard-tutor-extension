@@ -10,7 +10,7 @@ import {
     type LectureState,
     type PlaybackSnapshot
 } from "../shared/protocol";
-import type { TutorAnswer } from "../shared/tutor";
+import type { tutorStreamEvent } from "../shared/tutor";
 import { PlaybackTracker } from "./PlaybackTracker";
 import { SidebarView } from "./SidebarView";
 import { ToolbarController } from "./ToolbarController";
@@ -263,7 +263,7 @@ export class LectureController
 
         try
         {
-            const response = await sendRequest({
+            const request: Extract<contentRequest, { kind: "askTutor" }> = {
                 kind: "askTutor",
                 lectureTitle: getLectureTitle(),
                 question: {
@@ -272,16 +272,55 @@ export class LectureController
                     question,
                     currentFrameDataUrl: this.tracker.captureCurrentFrame()
                 }
-            });
+            };
+            const port = chrome.runtime.connect({ name: "tutorStream" });
+            let message: HTMLElement | null = null;
 
-            if (!response.ok)
+            await new Promise<void>((resolve) =>
             {
-                this.sidebar.addMessage("assistant", response.error.message);
-                void this.refreshTutorStatus();
-                return;
-            }
+                let finished = false;
+                port.onMessage.addListener((event: tutorStreamEvent) =>
+                {
+                    if (event.kind === "text")
+                    {
+                        message ??= this.sidebar.startTutorAnswer();
+                        this.sidebar.updateTutorAnswer(message, event.text);
+                    }
+                    else
+                    {
+                        finished = true;
 
-            this.sidebar.addTutorAnswer(response.data as TutorAnswer);
+                        if (event.kind === "complete")
+                        {
+                            message ??= this.sidebar.startTutorAnswer();
+                            this.sidebar.finishTutorAnswer(message, event.answer);
+                        }
+                        else
+                        {
+                            this.sidebar.addMessage("assistant", message === null
+                                ? event.error.message
+                                : `The response above is incomplete. ${event.error.message}`);
+                            void this.refreshTutorStatus();
+                        }
+
+                        port.disconnect();
+                        resolve();
+                    }
+                });
+                port.onDisconnect.addListener(() =>
+                {
+                    if (!finished)
+                    {
+                        this.sidebar.addMessage("assistant", "The tutor response was interrupted. Please try again.");
+                        resolve();
+                    }
+                });
+                port.postMessage(request);
+            });
+        }
+        catch
+        {
+            this.sidebar.addMessage("assistant", "The extension service is temporarily unavailable. Please try again.");
         }
         finally
         {

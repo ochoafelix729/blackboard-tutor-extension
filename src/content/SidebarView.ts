@@ -3,6 +3,7 @@
 import type { LectureProcessingStatus } from "../shared/ingestion";
 import type { downloadStatus, LectureState, PlaybackSnapshot } from "../shared/protocol";
 import type { TutorAnswer } from "../shared/tutor";
+import { renderAnswer } from "./renderAnswer";
 import {
     clampSidebarWidth,
     getDefaultSidebarWidth,
@@ -272,7 +273,7 @@ const sidebarMarkup = `
         }
 
         .timestamp {
-            display: inline-block;
+            display: block;
             margin: 7px 8px 0 0;
             padding: 0;
             color: inherit;
@@ -346,6 +347,30 @@ const sidebarMarkup = `
         .answer-text,
         .limitations {
             margin: 0;
+        }
+
+        .answer-text {
+            white-space: normal;
+            overflow-wrap: anywhere;
+        }
+
+        .answer-text > :first-child {
+            margin-top: 0;
+        }
+
+        .answer-text > :last-child {
+            margin-bottom: 0;
+        }
+
+        .answer-text section {
+            max-width: 100%;
+            overflow-x: auto;
+        }
+
+        .answer-text pre {
+            max-width: 100%;
+            overflow-x: auto;
+            white-space: pre;
         }
 
         .limitations {
@@ -723,10 +748,7 @@ export class SidebarView
         const message = document.createElement("div");
         message.className = "message assistant";
 
-        const answerText = document.createElement("p");
-        answerText.className = "answer-text";
-        answerText.textContent = answer.answer;
-        message.append(answerText);
+        message.append(renderAnswer(answer.answer));
 
         for (const citation of answer.citations)
         {

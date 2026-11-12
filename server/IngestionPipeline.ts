@@ -4,27 +4,22 @@ import { spawn } from "node:child_process";
 import { promises as fileSystem } from "node:fs";
 import path from "node:path";
 import type { processingStage } from "../src/shared/ingestion";
-import type { ModelProvider } from "./ModelProvider";
-import { PhaseTwoStore } from "./PhaseTwoStore";
+import type { OpenAiProvider } from "./OpenAiProvider";
+import { LectureStore } from "./LectureStore";
 import type {
     EmbeddingArtifact,
     LectureRecord,
     LectureSegment,
-    MediaMetadataArtifact,
     SegmentArtifact,
     TranscriptArtifact,
+    TranscriptSegment,
     VisualArtifact,
     VisualEvidence
 } from "./ingestionTypes";
-import { parseWebVtt, type TranscriptSegment } from "./vttParser";
 
-export const pipelineVersion = 1;
-const maximumTranscriptBytes = 25_000_000;
-const maximumAudioChunkBytes = 24_000_000;
-const maximumDiagnosticBytes = 10_000_000;
 const maximumFrames = 240;
 const embeddingBatchSize = 64;
-const audioChunkSeconds = 600;
+const audioChunkSeconds = 120;
 const ignoredTopicTerms = new Set([
     "about",
     "after",
@@ -83,20 +78,10 @@ function runCommand(command: string, arguments_: string[]): Promise<CommandResul
         child.stdout.on("data", (chunk: string) =>
         {
             stdout += chunk;
-
-            if (stdout.length > maximumDiagnosticBytes)
-            {
-                stdout = stdout.slice(-maximumDiagnosticBytes);
-            }
         });
         child.stderr.on("data", (chunk: string) =>
         {
             stderr += chunk;
-
-            if (stderr.length > maximumDiagnosticBytes)
-            {
-                stderr = stderr.slice(-maximumDiagnosticBytes);
-            }
         });
         child.on("error", (error) =>
         {
@@ -113,44 +98,6 @@ function runCommand(command: string, arguments_: string[]): Promise<CommandResul
             resolve({ stdout, stderr });
         });
     });
-}
-
-function isRecord(value: unknown): value is Record<string, unknown>
-{
-    return typeof value === "object" && value !== null;
-}
-
-function readCodecName(streams: unknown[], codecType: string): string | null
-{
-    const stream = streams.find((candidate) =>
-    {
-        return isRecord(candidate) && candidate.codec_type === codecType;
-    });
-    return isRecord(stream) && typeof stream.codec_name === "string" ? stream.codec_name : null;
-}
-
-function parseMediaMetadata(source: string): MediaMetadataArtifact
-{
-    const value: unknown = JSON.parse(source);
-
-    if (!isRecord(value) || !isRecord(value.format) || !Array.isArray(value.streams))
-    {
-        throw new Error("ffprobe returned invalid lecture metadata.");
-    }
-
-    const durationSeconds = Number(value.format.duration);
-
-    if (!Number.isFinite(durationSeconds) || durationSeconds <= 0)
-    {
-        throw new Error("The lecture video has no usable duration.");
-    }
-
-    return {
-        durationSeconds,
-        formatName: typeof value.format.format_name === "string" ? value.format.format_name : "unknown",
-        videoCodec: readCodecName(value.streams, "video"),
-        audioCodec: readCodecName(value.streams, "audio")
-    };
 }
 
 function getTopic(transcript: TranscriptSegment[]): string
@@ -260,7 +207,7 @@ async function getMediaDuration(filePath: string): Promise<number>
 
     if (!Number.isFinite(durationSeconds) || durationSeconds <= 0)
     {
-        throw new Error("The extracted audio chunk has no usable duration.");
+        throw new Error("The media file has no usable duration.");
     }
 
     return durationSeconds;
@@ -268,14 +215,14 @@ async function getMediaDuration(filePath: string): Promise<number>
 
 export class IngestionPipeline
 {
-    private readonly store: PhaseTwoStore;
-    private readonly provider: ModelProvider;
+    private readonly store: LectureStore;
+    private readonly provider: OpenAiProvider;
     private readonly embeddingModel: string;
     private readonly transcriptionModel: string;
 
     constructor(
-        store: PhaseTwoStore,
-        provider: ModelProvider,
+        store: LectureStore,
+        provider: OpenAiProvider,
         embeddingModel: string,
         transcriptionModel: string
     )
@@ -286,49 +233,22 @@ export class IngestionPipeline
         this.transcriptionModel = transcriptionModel;
     }
 
-    async process(lectureId: string): Promise<void>
+    async process(lecture: LectureRecord): Promise<void>
     {
-        const lecture = await this.store.getLecture(lectureId);
-
-        if (lecture === null)
-        {
-            throw new Error(`Lecture is not registered: ${lectureId}`);
-        }
-
-        const extractionResults = await Promise.allSettled([
-            this.processMetadata(lecture),
-            this.processTranscript(lecture),
-            this.processVisuals(lecture)
-        ]);
-
-        const extractionFailure = extractionResults.find((result) => result.status === "rejected");
-
-        if (extractionFailure?.status === "rejected")
-        {
-            throw extractionFailure.reason;
-        }
-
+        await this.processMetadata(lecture);
+        await this.processTranscript(lecture);
+        await this.processVisuals(lecture);
         await this.processSegments(lecture);
         await this.processEmbeddings(lecture);
-        await this.store.removeManagedSources(lecture);
+        await this.store.removeSourceMedia(lecture.lectureId);
     }
 
     private async processMetadata(lecture: LectureRecord): Promise<void>
     {
         await this.runStage(lecture, "metadata", async () =>
         {
-            const result = await runCommand("ffprobe", [
-                "-v",
-                "error",
-                "-show_format",
-                "-show_streams",
-                "-of",
-                "json",
-                lecture.source.videoPath
-            ]);
-            const metadata = parseMediaMetadata(result.stdout);
-            await this.store.writeArtifact(lecture.lectureId, "metadata", pipelineVersion, metadata);
-            await this.store.setLectureDuration(lecture.lectureId, metadata.durationSeconds);
+            const durationSeconds = await getMediaDuration(this.store.getRecordingPath(lecture.lectureId));
+            await this.store.setLectureDuration(lecture, durationSeconds);
         });
     }
 
@@ -336,102 +256,70 @@ export class IngestionPipeline
     {
         await this.runStage(lecture, "transcript", async () =>
         {
-            const segments = lecture.source.transcriptPath === null
-                ? await this.transcribeVideo(lecture)
-                : await this.readWebVttTranscript(lecture.source.transcriptPath);
-            const artifact: TranscriptArtifact = { segments };
-
-            if (artifact.segments.length === 0)
-            {
-                throw new Error("The lecture transcript contains no usable timestamped cues.");
-            }
-
-            await this.store.writeArtifact(lecture.lectureId, "transcript", pipelineVersion, artifact);
+            await this.transcribeVideo(lecture);
         });
     }
 
-    private async readWebVttTranscript(transcriptPath: string): Promise<TranscriptSegment[]>
+    private async transcribeVideo(lecture: LectureRecord): Promise<void>
     {
-        const statistics = await fileSystem.stat(transcriptPath);
+        const durationSeconds = lecture.durationSeconds;
 
-        if (!statistics.isFile() || statistics.size > maximumTranscriptBytes)
+        if (durationSeconds === null)
         {
-            throw new Error("The transcript is missing or exceeds the supported size.");
+            throw new Error("Media duration must be available before transcription.");
         }
 
-        const source = await fileSystem.readFile(transcriptPath, "utf8");
-        const segments = parseWebVtt(source);
-
-        if (segments.length === 0)
-        {
-            throw new Error("The WebVTT transcript contains no usable timestamped cues.");
-        }
-
-        return segments;
-    }
-
-    private async transcribeVideo(lecture: LectureRecord): Promise<TranscriptSegment[]>
-    {
-        const audioDirectory = path.join(this.store.getSourceDirectory(lecture.lectureId), "audio");
+        const previous = await this.store.readArtifact<TranscriptArtifact>(lecture.lectureId, "transcript");
+        // Only checkpointed artifacts can safely identify which audio is still unfinished.
+        const segments = previous?.processedThroughSeconds === undefined ? [] : previous.segments;
+        let processedThroughSeconds = previous?.processedThroughSeconds ?? 0;
+        const audioDirectory = path.join(this.store.getLectureDirectory(lecture.lectureId), "audio");
         await fileSystem.rm(audioDirectory, { recursive: true, force: true });
         await fileSystem.mkdir(audioDirectory, { recursive: true, mode: 0o700 });
-        const audioPattern = path.join(audioDirectory, "chunk-%04d.mp3");
+        const chunkPath = path.join(audioDirectory, "chunk.mp3");
 
         try
         {
-            await runCommand("ffmpeg", [
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-i",
-                lecture.source.videoPath,
-                "-vn",
-                "-ac",
-                "1",
-                "-ar",
-                "16000",
-                "-c:a",
-                "libmp3lame",
-                "-b:a",
-                "32k",
-                "-f",
-                "segment",
-                "-segment_time",
-                String(audioChunkSeconds),
-                "-reset_timestamps",
-                "1",
-                audioPattern
-            ]);
-            const chunkNames = (await fileSystem.readdir(audioDirectory))
-                .filter((name) => /^chunk-\d+\.mp3$/i.test(name))
-                .sort();
+            await this.store.setTranscriptProgress(lecture, {
+                processedThroughSeconds,
+                durationSeconds,
+                segmentCount: segments.length
+            });
 
-            if (chunkNames.length === 0)
+            while (processedThroughSeconds < durationSeconds)
             {
-                throw new Error("The lecture video has no extractable audio for transcription.");
-            }
-
-            const segments: TranscriptSegment[] = [];
-            let timeOffsetSeconds = 0;
-
-            for (const chunkName of chunkNames)
-            {
-                const chunkPath = path.join(audioDirectory, chunkName);
-                const statistics = await fileSystem.stat(chunkPath);
-
-                if (!statistics.isFile() || statistics.size > maximumAudioChunkBytes)
-                {
-                    throw new Error("An extracted audio chunk exceeds the transcription upload limit.");
-                }
-
-                const [audio, durationSeconds] = await Promise.all([
-                    fileSystem.readFile(chunkPath),
-                    getMediaDuration(chunkPath)
+                const startSeconds = processedThroughSeconds;
+                const endSeconds = Math.min(durationSeconds, startSeconds + audioChunkSeconds);
+                const extractionStartedAt = Date.now();
+                await runCommand("ffmpeg", [
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-y",
+                    "-ss",
+                    String(startSeconds),
+                    "-i",
+                    this.store.getRecordingPath(lecture.lectureId),
+                    "-t",
+                    String(endSeconds - startSeconds),
+                    "-vn",
+                    "-ac",
+                    "1",
+                    "-ar",
+                    "16000",
+                    "-c:a",
+                    "libmp3lame",
+                    "-b:a",
+                    "32k",
+                    chunkPath
                 ]);
+                const extractionDurationMilliseconds = Date.now() - extractionStartedAt;
+                const audio = await fileSystem.readFile(chunkPath);
+                const transcriptionStartedAt = Date.now();
                 const result = await this.provider.transcribe({
                     model: this.transcriptionModel,
                     audio,
-                    filename: chunkName,
+                    filename: "chunk.mp3",
                     mimeType: "audio/mpeg"
                 });
 
@@ -439,16 +327,33 @@ export class IngestionPipeline
                 {
                     segments.push({
                         id: `transcript-asr-${String(segments.length + 1).padStart(5, "0")}`,
-                        startSeconds: timeOffsetSeconds + segment.startSeconds,
-                        endSeconds: timeOffsetSeconds + segment.endSeconds,
+                        startSeconds: Math.min(endSeconds, startSeconds + segment.startSeconds),
+                        endSeconds: Math.min(endSeconds, startSeconds + segment.endSeconds),
                         text: segment.text
                     });
                 }
 
-                timeOffsetSeconds += durationSeconds;
+                const transcriptionDurationMilliseconds = Date.now() - transcriptionStartedAt;
+                processedThroughSeconds = endSeconds;
+                const artifact: TranscriptArtifact = { segments, processedThroughSeconds };
+                await this.store.writeArtifact(lecture.lectureId, "transcript", artifact);
+                await this.store.setTranscriptProgress(lecture, {
+                    processedThroughSeconds,
+                    durationSeconds,
+                    segmentCount: segments.length
+                });
+                console.info("Lecture audio chunk completed", {
+                    startSeconds,
+                    endSeconds,
+                    extractionDurationMilliseconds,
+                    transcriptionDurationMilliseconds
+                });
             }
 
-            return segments;
+            if (segments.length === 0)
+            {
+                throw new Error("The lecture transcript contains no usable timestamped cues.");
+            }
         }
         finally
         {
@@ -460,10 +365,7 @@ export class IngestionPipeline
     {
         await this.runStage(lecture, "visuals", async () =>
         {
-            const frameDirectory = this.store.getArtifactImageDirectory(
-                lecture.lectureId,
-                pipelineVersion
-            );
+            const frameDirectory = this.store.getFramesDirectory(lecture.lectureId);
             await fileSystem.rm(frameDirectory, { recursive: true, force: true });
             await fileSystem.mkdir(frameDirectory, { recursive: true, mode: 0o700 });
             const framePattern = path.join(frameDirectory, "frame-%05d.jpg");
@@ -472,7 +374,7 @@ export class IngestionPipeline
                 "-loglevel",
                 "info",
                 "-i",
-                lecture.source.videoPath,
+                this.store.getRecordingPath(lecture.lectureId),
                 "-vf",
                 "select=eq(n\\,0)+gt(scene\\,0.18),scale=min(1600\\,iw):-2,showinfo",
                 "-fps_mode",
@@ -496,8 +398,6 @@ export class IngestionPipeline
                 throw new Error("No representative frames were extracted from the lecture video.");
             }
 
-            const currentLecture = await this.store.getLecture(lecture.lectureId);
-
             const frames: VisualEvidence[] = frameFiles.map((name, index) =>
             {
                 const timestampSeconds = timestamps[index] ?? 0;
@@ -505,13 +405,13 @@ export class IngestionPipeline
                 return {
                     id: `frame-${String(index + 1).padStart(5, "0")}`,
                     timestampSeconds,
-                    endSeconds: nextTimestamp ?? currentLecture?.durationSeconds ?? timestampSeconds,
-                    relativeImagePath: `frames-v${pipelineVersion}/${name}`,
+                    endSeconds: nextTimestamp ?? lecture.durationSeconds ?? timestampSeconds,
+                    relativeImagePath: `frames/${name}`,
                     description: null
                 };
             });
             const artifact: VisualArtifact = { frames };
-            await this.store.writeArtifact(lecture.lectureId, "visuals", pipelineVersion, artifact);
+            await this.store.writeArtifact(lecture.lectureId, "visuals", artifact);
         });
     }
 
@@ -533,7 +433,7 @@ export class IngestionPipeline
             const artifact: SegmentArtifact = {
                 segments: buildSemanticSegments(transcript.segments, visuals.frames)
             };
-            await this.store.writeArtifact(lecture.lectureId, "segments", pipelineVersion, artifact);
+            await this.store.writeArtifact(lecture.lectureId, "segments", artifact);
         });
     }
 
@@ -562,24 +462,14 @@ export class IngestionPipeline
                 vectors.push(...result.vectors);
             }
 
-            const dimensions = vectors[0]?.length ?? 0;
-
-            if (dimensions === 0
-                || vectors.length !== segments.segments.length
-                || vectors.some((vector) => vector.length !== dimensions))
-            {
-                throw new Error("The embedding provider returned inconsistent vectors.");
-            }
-
             const artifact: EmbeddingArtifact = {
                 model: resolvedModel,
-                dimensions,
                 embeddings: segments.segments.map((segment, index) => ({
                     segmentId: segment.id,
                     vector: vectors[index] ?? []
                 }))
             };
-            await this.store.writeArtifact(lecture.lectureId, "embeddings", pipelineVersion, artifact);
+            await this.store.writeArtifact(lecture.lectureId, "embeddings", artifact);
         });
     }
 
@@ -589,24 +479,30 @@ export class IngestionPipeline
         operation: () => Promise<void>
     ): Promise<void>
     {
-        const current = await this.store.getLecture(lecture.lectureId);
-
-        if (current?.stages[stage].status === "ready")
+        if (lecture.stages[stage].status === "ready")
         {
             return;
         }
 
-        await this.store.setStageStatus(lecture.lectureId, stage, "processing");
+        await this.store.setStageStatus(lecture, stage, "processing");
 
         try
         {
             await operation();
-            await this.store.setStageStatus(lecture.lectureId, stage, "ready");
+            await this.store.setStageStatus(lecture, stage, "ready");
+            console.info("Lecture stage completed", {
+                stage,
+                durationMilliseconds: lecture.stages[stage].durationMilliseconds
+            });
         }
         catch (error)
         {
             const message = error instanceof Error ? error.message : "The ingestion stage failed.";
-            await this.store.setStageStatus(lecture.lectureId, stage, "failed", message);
+            await this.store.setStageStatus(lecture, stage, "failed", message);
+            console.error("Lecture stage failed", {
+                stage,
+                durationMilliseconds: lecture.stages[stage].durationMilliseconds
+            });
             throw error;
         }
     }

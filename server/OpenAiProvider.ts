@@ -1,16 +1,55 @@
-// Implements answer generation and embeddings with OpenAI's Responses and Embeddings APIs.
+// Calls OpenAI for transcript-and-visual answers, embeddings, and audio transcription.
 
-import type {
-    EmbeddingRequest,
-    EmbeddingResult,
-    ModelAnswer,
-    ModelProvider,
-    ModelRequest,
-    ModelResult,
-    TranscriptionRequest,
-    TranscriptionResult
-} from "./ModelProvider";
-import type { TokenUsage } from "./modelPricing";
+import { isTutorAnswer, type TutorAnswer } from "../src/shared/tutor";
+
+export interface ModelImage
+{
+    dataUrl: string;
+    evidenceId: string;
+    timestampSeconds: number;
+}
+
+interface ModelRequest
+{
+    model: string;
+    systemPrompt: string;
+    userPrompt: string;
+    images: ModelImage[];
+    reasoningEffort: string;
+    maxOutputTokens: number;
+}
+
+interface EmbeddingRequest
+{
+    model: string;
+    inputs: string[];
+}
+
+interface EmbeddingResult
+{
+    model: string;
+    vectors: number[][];
+}
+
+interface TranscriptionSegment
+{
+    startSeconds: number;
+    endSeconds: number;
+    text: string;
+}
+
+interface TranscriptionRequest
+{
+    model: string;
+    audio: Buffer;
+    filename: string;
+    mimeType: string;
+}
+
+interface TranscriptionResult
+{
+    segments: TranscriptionSegment[];
+}
 
 interface OpenAiProviderOptions
 {
@@ -56,73 +95,10 @@ function getResponseText(response: Record<string, unknown>): string | null
     return null;
 }
 
-function readNonnegativeNumber(value: unknown): number
-{
-    return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
-}
-
-function readUsage(value: unknown): TokenUsage
-{
-    const usage = isRecord(value) ? value : {};
-    const inputDetails = isRecord(usage.input_tokens_details) ? usage.input_tokens_details : {};
-    const outputDetails = isRecord(usage.output_tokens_details) ? usage.output_tokens_details : {};
-
-    return {
-        inputTokens: readNonnegativeNumber(usage.input_tokens),
-        cachedInputTokens: readNonnegativeNumber(inputDetails.cached_tokens),
-        cacheWriteTokens: readNonnegativeNumber(inputDetails.cache_write_tokens),
-        outputTokens: readNonnegativeNumber(usage.output_tokens),
-        reasoningTokens: readNonnegativeNumber(outputDetails.reasoning_tokens)
-    };
-}
-
-function normalizeModelAnswer(value: unknown): ModelAnswer
-{
-    if (!isRecord(value)
-        || typeof value.answer !== "string"
-        || !Array.isArray(value.citations)
-        || !Array.isArray(value.usedModalities)
-        || !Array.isArray(value.limitations))
-    {
-        throw new Error("The model returned an invalid structured answer.");
-    }
-
-    const citations = value.citations.map((citation) =>
-    {
-        if (!isRecord(citation)
-            || typeof citation.startSeconds !== "number"
-            || typeof citation.endSeconds !== "number"
-            || !Array.isArray(citation.evidenceIds)
-            || !citation.evidenceIds.every((id) => typeof id === "string"))
-        {
-            throw new Error("The model returned an invalid citation.");
-        }
-
-        return {
-            startSeconds: citation.startSeconds,
-            endSeconds: citation.endSeconds,
-            evidenceIds: citation.evidenceIds
-        };
-    });
-
-    if (!value.usedModalities.every((item) => typeof item === "string")
-        || !value.limitations.every((item) => typeof item === "string"))
-    {
-        throw new Error("The model returned invalid answer metadata.");
-    }
-
-    return {
-        answer: value.answer,
-        citations,
-        usedModalities: value.usedModalities as string[],
-        limitations: value.limitations as string[]
-    };
-}
-
 const answerSchema = {
     type: "object",
     additionalProperties: false,
-    required: ["answer", "citations", "usedModalities", "limitations"],
+    required: ["answer", "citations", "limitations"],
     properties: {
         answer: { type: "string" },
         citations: {
@@ -141,10 +117,6 @@ const answerSchema = {
                 }
             }
         },
-        usedModalities: {
-            type: "array",
-            items: { type: "string" }
-        },
         limitations: {
             type: "array",
             items: { type: "string" }
@@ -152,7 +124,7 @@ const answerSchema = {
     }
 };
 
-export class OpenAiProvider implements ModelProvider
+export class OpenAiProvider
 {
     private readonly apiKey: string;
     private readonly baseUrl: string;
@@ -163,7 +135,7 @@ export class OpenAiProvider implements ModelProvider
         this.baseUrl = options.baseUrl;
     }
 
-    async generate(request: ModelRequest): Promise<ModelResult>
+    async generate(request: ModelRequest): Promise<TutorAnswer>
     {
         if (this.apiKey.length === 0)
         {
@@ -257,13 +229,12 @@ export class OpenAiProvider implements ModelProvider
             throw new Error("OpenAI returned malformed structured output.");
         }
 
-        return {
-            provider: "openai",
-            model: typeof responseValue.model === "string" ? responseValue.model : request.model,
-            providerRequestId: typeof responseValue.id === "string" ? responseValue.id : null,
-            answer: normalizeModelAnswer(parsedAnswer),
-            usage: readUsage(responseValue.usage)
-        };
+        if (!isTutorAnswer(parsedAnswer))
+        {
+            throw new Error("OpenAI returned an invalid structured tutor answer.");
+        }
+
+        return parsedAnswer;
     }
 
     async embed(request: EmbeddingRequest): Promise<EmbeddingResult>
@@ -390,9 +361,6 @@ export class OpenAiProvider implements ModelProvider
             };
         });
 
-        return {
-            model: typeof responseValue.model === "string" ? responseValue.model : request.model,
-            segments
-        };
+        return { segments };
     }
 }

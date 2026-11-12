@@ -1,14 +1,11 @@
-// Retrieves lecture evidence, invokes the selected model, validates citations, and records costs.
+// Answers lecture questions with transcript and visual evidence and validated timestamp citations.
 
 import type { TutorAnswer, TutorCitation, TutorQuestion } from "../src/shared/tutor";
 import { evaluateQuestionScope } from "../src/shared/questionScope";
 import type { ServerConfig } from "./config";
 import { AutoRegistrationService } from "./AutoRegistrationService";
-import { CostLedger } from "./CostLedger";
 import { EvidenceRepository, type RetrievedEvidence } from "./EvidenceRepository";
-import { IngestionCoordinator } from "./IngestionCoordinator";
-import type { ModelImage, ModelProvider } from "./ModelProvider";
-import { PhaseTwoStore } from "./PhaseTwoStore";
+import type { ModelImage, OpenAiProvider } from "./OpenAiProvider";
 import { TutorServiceError } from "./TutorServiceError";
 
 interface EvidenceRange
@@ -16,8 +13,6 @@ interface EvidenceRange
     startSeconds: number;
     endSeconds: number;
 }
-
-const maximumCurrentFrameLength = 8_000_000;
 
 function formatEvidence(evidence: RetrievedEvidence): string
 {
@@ -36,7 +31,7 @@ function formatEvidence(evidence: RetrievedEvidence): string
         "Transcript evidence:",
         transcriptText,
         "Visual evidence labels:",
-        frameText.length > 0 ? frameText : "None supplied for this strategy."
+        frameText.length > 0 ? frameText : "No representative frame is available yet."
     ].join("\n\n");
 }
 
@@ -101,40 +96,24 @@ function normalizeCitations(
     });
 }
 
-function isSupportedCurrentFrame(dataUrl: string | null): dataUrl is string
-{
-    return dataUrl !== null
-        && dataUrl.length <= maximumCurrentFrameLength
-        && /^data:image\/(?:jpeg|png|webp|gif);base64,[a-z0-9+/=]+$/i.test(dataUrl);
-}
-
 export class TutorService
 {
     private readonly config: ServerConfig;
     private readonly evidenceRepository: EvidenceRepository;
     private readonly autoRegistrationService: AutoRegistrationService;
-    private readonly ingestionCoordinator: IngestionCoordinator;
-    private readonly store: PhaseTwoStore;
-    private readonly provider: ModelProvider;
-    private readonly costLedger: CostLedger;
+    private readonly provider: OpenAiProvider;
 
     constructor(
         config: ServerConfig,
         evidenceRepository: EvidenceRepository,
         autoRegistrationService: AutoRegistrationService,
-        ingestionCoordinator: IngestionCoordinator,
-        store: PhaseTwoStore,
-        provider: ModelProvider,
-        costLedger: CostLedger
+        provider: OpenAiProvider
     )
     {
         this.config = config;
         this.evidenceRepository = evidenceRepository;
         this.autoRegistrationService = autoRegistrationService;
-        this.ingestionCoordinator = ingestionCoordinator;
-        this.store = store;
         this.provider = provider;
-        this.costLedger = costLedger;
     }
 
     async answer(question: TutorQuestion): Promise<TutorAnswer>
@@ -146,34 +125,32 @@ export class TutorService
             throw new TutorServiceError("questionOutOfScope", scopeDecision.message);
         }
 
-        const traceId = this.costLedger.createTraceId();
-        const startedAt = Date.now();
-        const model = question.strategy === "multimodal"
-            ? this.config.visionModel
-            : this.config.textModel;
         let evidence: RetrievedEvidence;
 
-        const isRegistered = await this.ingestionCoordinator.ensureProcessing(question.lectureId);
-
-        if (!isRegistered)
-        {
-            const acquisitionStatus = await this.autoRegistrationService.getStatus(question.lectureId);
-            const isAcquiring = await this.autoRegistrationService.isAcquiring(question.lectureId);
-            const errorCode = isAcquiring ? "lectureProcessing" : "evidenceUnavailable";
-            await this.recordFailure(traceId, question, model, startedAt, errorCode);
-            throw new TutorServiceError(
-                errorCode,
-                acquisitionStatus?.message
-                    ?? "Start the lecture so its authorized recording can be acquired automatically."
-            );
-        }
-
-        const processingStatus = await this.store.getStatus(question.lectureId);
+        const processingStatus = await this.autoRegistrationService.getStatus(question.lectureId);
 
         if (processingStatus?.capabilities.hasTranscript !== true)
         {
-            await this.recordFailure(traceId, question, model, startedAt, "lectureProcessing");
-            throw new TutorServiceError("lectureProcessing", processingStatus?.message ?? "Lecture processing started.");
+            throw new TutorServiceError(
+                processingStatus?.status === "processing" ? "lectureProcessing" : "evidenceUnavailable",
+                processingStatus?.message ?? "Open the recording page to prepare this lecture."
+            );
+        }
+
+        const transcriptProgress = processingStatus.transcriptProgress;
+        const isTranscriptComplete = processingStatus.stages.some((stage) =>
+        {
+            return stage.stage === "transcript" && stage.status === "ready";
+        });
+
+        if (!isTranscriptComplete
+            && transcriptProgress !== undefined
+            && question.timestampSeconds > transcriptProgress.processedThroughSeconds)
+        {
+            throw new TutorServiceError(
+                processingStatus.status === "processing" ? "lectureProcessing" : "evidenceUnavailable",
+                "The transcript has not reached this playback time yet. " + processingStatus.message
+            );
         }
 
         try
@@ -181,16 +158,14 @@ export class TutorService
             evidence = await this.evidenceRepository.retrieve(
                 question.lectureId,
                 question.timestampSeconds,
-                question.question,
-                question.strategy
+                question.question
             );
         }
         catch
         {
-            await this.recordFailure(traceId, question, model, startedAt, "evidenceUnavailable");
             throw new TutorServiceError(
                 "evidenceUnavailable",
-                "No usable Phase 2 transcript evidence is available for this lecture."
+                "No usable transcript evidence is available for this lecture."
             );
         }
 
@@ -202,10 +177,7 @@ export class TutorService
                 timestampSeconds: frame.timestampSeconds
             };
         });
-        const currentFrameDataUrl = question.strategy === "multimodal"
-            && isSupportedCurrentFrame(question.currentFrameDataUrl)
-            ? question.currentFrameDataUrl
-            : null;
+        const currentFrameDataUrl = question.currentFrameDataUrl;
         const hasCurrentFrame = currentFrameDataUrl !== null;
 
         if (hasCurrentFrame)
@@ -220,7 +192,7 @@ export class TutorService
         try
         {
             const result = await this.provider.generate({
-                model,
+                model: this.config.model,
                 systemPrompt: [
                     "You are a concise university lecture tutor.",
                     "Answer only from the current playback moment and the supplied evidence from at most the preceding 10 minutes.",
@@ -239,21 +211,11 @@ export class TutorService
                 reasoningEffort: this.config.reasoningEffort,
                 maxOutputTokens: this.config.maxOutputTokens
             });
-            const cost = await this.costLedger.recordSuccess({
-                traceId,
-                lectureId: question.lectureId,
-                strategy: question.strategy,
-                provider: result.provider,
-                model: result.model,
-                latencyMilliseconds: Date.now() - startedAt,
-                providerRequestId: result.providerRequestId,
-                usage: result.usage
-            });
             const evidenceRanges = createEvidenceRanges(evidence, question, hasCurrentFrame);
-            const citations = normalizeCitations(result.answer.citations, evidenceRanges);
-            const limitations = [...result.answer.limitations];
+            const citations = normalizeCitations(result.citations, evidenceRanges);
+            const limitations = [...result.limitations];
 
-            if (question.strategy === "multimodal" && images.length === 0)
+            if (images.length === 0)
             {
                 limitations.push("No representative frame was available, so this answer used transcript evidence only.");
             }
@@ -264,12 +226,9 @@ export class TutorService
             }
 
             return {
-                answer: result.answer.answer,
+                answer: result.answer,
                 citations,
-                usedModalities: result.answer.usedModalities,
-                limitations,
-                strategy: question.strategy,
-                cost
+                limitations
             };
         }
         catch (error)
@@ -279,30 +238,10 @@ export class TutorService
                 throw error;
             }
 
-            await this.recordFailure(traceId, question, model, startedAt, "modelFailed");
             throw new TutorServiceError(
                 "modelFailed",
                 "The configured tutor model could not produce an answer. Check the local API logs and model settings."
             );
         }
-    }
-
-    private async recordFailure(
-        traceId: string,
-        question: TutorQuestion,
-        model: string,
-        startedAt: number,
-        errorCategory: string
-    ): Promise<void>
-    {
-        await this.costLedger.recordFailure({
-            traceId,
-            lectureId: question.lectureId,
-            strategy: question.strategy,
-            provider: this.config.provider,
-            model,
-            latencyMilliseconds: Date.now() - startedAt,
-            errorCategory
-        });
     }
 }

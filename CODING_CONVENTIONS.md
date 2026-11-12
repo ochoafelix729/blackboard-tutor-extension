@@ -258,7 +258,7 @@ function getRequestOptions(lectureId: string): { lectureId: string }
 ## 7. TypeScript-first and runtime boundaries
 
 - Enable strict TypeScript checking for new project configurations (`strict: true`), and progressively fix pre-existing code when changing the compiler configuration.
-- Prefer `unknown` to `any` for values received from network messages, DOM queries, storage, and third-party APIs. Validate before accessing fields.
+- Use TypeScript contracts for data produced by this extension and its loopback API. Do not add repeated runtime shape checks for our own messages, local configuration, or recording URLs. Check external model output where it affects answer correctness, and report actual request failures.
 - Use discriminated unions for processing states where it makes invalid states harder to represent.
 - Avoid non-null assertions (`!`) unless the invariant is documented and enforced.
 - Treat extension content scripts, the background service worker, and future API/backend components as separate trust boundaries.
@@ -299,10 +299,10 @@ async function initializeLecture(lectureId: string): Promise<void>
 - Match class- and interface-primary filenames to the PascalCase primary export, such as `DownloadManager.ts` and `SidebarController.ts`. Use camelCase for function-primary or mixed modules, such as `lectureDetector.ts` and `protocol.ts`.
 - Keep interfaces/types near the domain code that owns them; extract shared types only when genuinely reused.
 - Do not add an abstraction, service, or new model integration simply because it may be useful later.
-- Preserve the extension's existing functionality when refactoring; add tests for new behavior where practicable.
+- Preserve download and local tutoring behavior when refactoring. Verify changes through TypeScript checking, builds, and code review; do not add or run automated tests.
 - Keep Chrome-extension-specific behavior distinct from model-provider and backend logic.
 
-## 10. Tests and code-review expectations
+## 10. Verification and code-review expectations
 
 Every contribution, whether written by a person or an AI assistant, should satisfy the following checklist:
 
@@ -314,20 +314,20 @@ Every contribution, whether written by a person or an AI assistant, should satis
 - [ ] Project-owned classes and interfaces use PascalCase, and class- or interface-primary filenames match that PascalCase export. Other project-owned identifiers and filenames use camelCase, including type aliases, enums, and constants.
 - [ ] Standalone reusable functions use named declarations; callbacks use arrow functions; object/class methods use method syntax.
 - [ ] External API naming exceptions are confined to integration boundaries.
-- [ ] TypeScript errors, lint failures, and related tests are addressed.
+- [ ] TypeScript checking and the extension build pass; no automated tests are added or run.
 - [ ] No secrets, sensitive URLs, or user lecture content are accidentally logged or committed.
 - [ ] Generated JavaScript is regenerated from source, not manually edited.
 
 ## 11. Suggested automated enforcement
 
-Use ESLint with `@typescript-eslint` to enforce brace requirements, explicit naming conventions, and consistent function syntax. Add a formatter or linter that supports **Allman brace style**; do not assume default Prettier formatting is compatible, because Prettier normally places statement opening braces on the same line.
+If linting is introduced, use ESLint with `@typescript-eslint` to enforce brace requirements, explicit naming conventions, and consistent function syntax. Add a formatter or linter that supports **Allman brace style**; do not assume default Prettier formatting is compatible, because Prettier normally places statement opening braces on the same line.
 
-Suggested checks to configure and test before making them CI-blocking:
+Suggested static checks to evaluate before making them required:
 
 - Four-space indentation and no hard tabs.
 - `curly: ['error', 'all']` for mandatory braces.
 - Naming-convention rules requiring PascalCase for project-owned classes, interfaces, and their primary filenames, and camelCase for other project-owned identifiers and filenames, with narrowly scoped external-format exceptions.
 - Rules discouraging function expressions for reusable function declarations, while allowing inline arrow callbacks.
-- TypeScript compiler in `noEmit` mode for type checking, plus lints and project tests.
+- TypeScript compiler in `noEmit` mode for type checking, plus any configured lints.
 
 **Do not install or change linting/formatting tools blindly.** Verify that they can produce and preserve Allman braces, including for `else`, `catch`, and `finally`, and document any unavoidable syntax-specific exceptions. Until tooling is configured, these documented conventions are the authoritative review standard.

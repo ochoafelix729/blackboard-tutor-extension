@@ -1,22 +1,20 @@
-// Retrieves watched, time-aligned Phase 2 evidence using temporal, lexical, and semantic ranking.
+// Retrieves watched, time-aligned local tutor evidence using temporal, lexical, and semantic ranking.
 
 import { promises as fileSystem } from "node:fs";
-import path from "node:path";
 import {
     lectureContextLookbackSeconds,
     lectureFutureToleranceSeconds
 } from "../src/shared/questionScope";
-import type { tutorStrategy } from "../src/shared/tutor";
-import type { ModelProvider } from "./ModelProvider";
-import { PhaseTwoStore } from "./PhaseTwoStore";
+import type { OpenAiProvider } from "./OpenAiProvider";
+import { LectureStore } from "./LectureStore";
 import type {
     EmbeddingArtifact,
     LectureSegment,
     SegmentArtifact,
     TranscriptArtifact,
+    TranscriptSegment,
     VisualArtifact
 } from "./ingestionTypes";
-import type { TranscriptSegment } from "./vttParser";
 
 export interface RetrievedFrame
 {
@@ -34,7 +32,6 @@ export interface RetrievedEvidence
     frames: RetrievedFrame[];
 }
 
-const maximumFrameBytes = 6_000_000;
 const ignoredTerms = new Set([
     "about",
     "does",
@@ -114,34 +111,6 @@ function getCosineSimilarity(first: number[], second: number[]): number
     return dotProduct / (Math.sqrt(firstMagnitude) * Math.sqrt(secondMagnitude));
 }
 
-function getFrameMimeType(filePath: string): string
-{
-    switch (path.extname(filePath).toLowerCase())
-    {
-        case ".png":
-        {
-            return "image/png";
-        }
-        case ".webp":
-        {
-            return "image/webp";
-        }
-        case ".gif":
-        {
-            return "image/gif";
-        }
-        case ".jpg":
-        case ".jpeg":
-        {
-            return "image/jpeg";
-        }
-        default:
-        {
-            throw new Error("Representative frames must be PNG, JPEG, WEBP, or GIF files.");
-        }
-    }
-}
-
 function selectTranscriptWithoutSegments(
     transcript: TranscriptSegment[],
     timestampSeconds: number,
@@ -170,11 +139,11 @@ function selectTranscriptWithoutSegments(
 
 export class EvidenceRepository
 {
-    private readonly store: PhaseTwoStore;
-    private readonly provider: ModelProvider;
+    private readonly store: LectureStore;
+    private readonly provider: OpenAiProvider;
     private readonly embeddingModel: string;
 
-    constructor(store: PhaseTwoStore, provider: ModelProvider, embeddingModel: string)
+    constructor(store: LectureStore, provider: OpenAiProvider, embeddingModel: string)
     {
         this.store = store;
         this.provider = provider;
@@ -184,8 +153,7 @@ export class EvidenceRepository
     async retrieve(
         lectureId: string,
         timestampSeconds: number,
-        question: string,
-        strategy: tutorStrategy
+        question: string
     ): Promise<RetrievedEvidence>
     {
         const lecture = await this.store.getLecture(lectureId);
@@ -219,9 +187,7 @@ export class EvidenceRepository
             throw new Error("The lecture transcript has no evidence at or before this timestamp.");
         }
 
-        const frames = strategy === "multimodal"
-            ? await this.loadFrames(lectureId, timestampSeconds, selectedSegments)
-            : [];
+        const frames = await this.loadFrames(lectureId, timestampSeconds, selectedSegments);
         return {
             lectureId,
             lectureTitle: lecture.title,
@@ -353,20 +319,13 @@ export class EvidenceRepository
             .slice(0, 2);
         return Promise.all(frames.map(async (frame) =>
         {
-            const framePath = this.store.getArtifactImagePath(lectureId, frame.relativeImagePath);
-            const statistics = await fileSystem.stat(framePath);
-
-            if (!statistics.isFile() || statistics.size > maximumFrameBytes)
-            {
-                throw new Error(`Representative frame is missing or exceeds ${maximumFrameBytes} bytes.`);
-            }
-
+            const framePath = this.store.getFramePath(lectureId, frame.relativeImagePath);
             const buffer = await fileSystem.readFile(framePath);
             return {
                 id: frame.id,
                 timestampSeconds: frame.timestampSeconds,
                 description: frame.description,
-                dataUrl: `data:${getFrameMimeType(framePath)};base64,${buffer.toString("base64")}`
+                dataUrl: `data:image/jpeg;base64,${buffer.toString("base64")}`
             };
         }));
     }

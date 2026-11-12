@@ -2,7 +2,7 @@
 
 import type { LectureProcessingStatus } from "../shared/ingestion";
 import type { downloadStatus, LectureState, PlaybackSnapshot } from "../shared/protocol";
-import type { TutorAnswer, tutorStrategy } from "../shared/tutor";
+import type { TutorAnswer } from "../shared/tutor";
 import {
     clampSidebarWidth,
     getDefaultSidebarWidth,
@@ -12,7 +12,7 @@ import {
 export interface SidebarCallbacks
 {
     onDownload(): void;
-    onQuestion(question: string, playback: PlaybackSnapshot | null, strategy: tutorStrategy): void;
+    onQuestion(question: string): void;
     onSeek(seconds: number): void;
 }
 
@@ -35,7 +35,6 @@ const sidebarMarkup = `
         }
 
         button,
-        select,
         textarea {
             font: inherit;
         }
@@ -314,7 +313,7 @@ const sidebarMarkup = `
         .composer-row {
             display: flex;
             align-items: center;
-            justify-content: space-between;
+            justify-content: flex-end;
             gap: 10px;
             margin-top: 8px;
         }
@@ -339,40 +338,13 @@ const sidebarMarkup = `
             opacity: 0.65;
         }
 
-        textarea:disabled,
-        select:disabled {
+        textarea:disabled {
             cursor: wait;
             opacity: 0.65;
         }
 
-        .strategy {
-            max-width: 170px;
-            padding: 6px 8px;
-            color: #263247;
-            background: #ffffff;
-            border: 1px solid #cbd2df;
-            border-radius: 7px;
-            font-size: 11px;
-        }
-
-        .consent {
-            display: flex;
-            align-items: flex-start;
-            gap: 7px;
-            margin-top: 9px;
-            color: #596579;
-            font-size: 10px;
-            line-height: 1.35;
-        }
-
-        .consent input {
-            flex: none;
-            margin: 2px 0 0;
-        }
-
         .answer-text,
-        .limitations,
-        .trace {
+        .limitations {
             margin: 0;
         }
 
@@ -381,14 +353,6 @@ const sidebarMarkup = `
             color: #596579;
             font-size: 11px;
         }
-
-        .trace {
-            margin-top: 8px;
-            color: #68748a;
-            font-size: 10px;
-            font-variant-numeric: tabular-nums;
-        }
-
     </style>
     <button class="launcher" type="button" aria-label="Open lecture tutor" hidden>Tutor</button>
     <aside class="panel" aria-label="Lecture tutor">
@@ -416,7 +380,7 @@ const sidebarMarkup = `
                 <span class="media-status">Waiting for authorized media…</span>
             </div>
             <div class="context-row">
-                <span class="tutor-status">Checking Phase 2 evidence…</span>
+                <span class="tutor-status">Checking lecture evidence…</span>
             </div>
             <div class="context-row">
                 <input
@@ -432,15 +396,7 @@ const sidebarMarkup = `
         <div class="messages" role="log" aria-live="polite"></div>
         <form class="composer">
             <textarea aria-label="Ask about this lecture" placeholder="Ask about now or the last 10 minutes…" required></textarea>
-            <label class="consent">
-                <input type="checkbox" class="consent-input">
-                <span>Process this authorized lecture locally and send only required audio or retrieved evidence to the configured AI provider.</span>
-            </label>
             <div class="composer-row">
-                <select class="strategy" aria-label="Tutor evidence strategy">
-                    <option value="transcriptOnly">Transcript only</option>
-                    <option value="multimodal">Transcript + visuals</option>
-                </select>
                 <button class="ask" type="submit">Ask</button>
             </div>
             <div class="composer-row">
@@ -517,10 +473,7 @@ export class SidebarView
     private readonly messages: HTMLElement;
     private readonly form: HTMLFormElement;
     private readonly textarea: HTMLTextAreaElement;
-    private readonly strategy: HTMLSelectElement;
     private readonly askButton: HTMLButtonElement;
-    private readonly consentInput: HTMLInputElement;
-    private playback: PlaybackSnapshot | null = null;
     private isOpen = true;
     private sidebarWidth = getDefaultSidebarWidth(window.innerWidth);
     private activeResizePointerId: number | null = null;
@@ -548,9 +501,7 @@ export class SidebarView
         this.messages = requireElement(shadowRoot, ".messages");
         this.form = requireElement(shadowRoot, ".composer");
         this.textarea = requireElement(shadowRoot, "textarea");
-        this.strategy = requireElement(shadowRoot, ".strategy");
         this.askButton = requireElement(shadowRoot, ".ask");
-        this.consentInput = requireElement(shadowRoot, ".consent-input");
 
         requireElement<HTMLButtonElement>(shadowRoot, ".close").addEventListener("click", () =>
         {
@@ -589,10 +540,6 @@ export class SidebarView
         {
             event.preventDefault();
             this.submitQuestion();
-        });
-        this.consentInput.addEventListener("change", () =>
-        {
-            this.updateAskAvailability();
         });
         this.textarea.addEventListener("keydown", (event) =>
         {
@@ -658,7 +605,6 @@ export class SidebarView
 
     setPlayback(playback: PlaybackSnapshot): void
     {
-        this.playback = playback;
         const durationText = playback.duration === null ? "" : ` / ${formatTime(playback.duration)}`;
         this.time.textContent = `${formatTime(playback.currentTime)}${durationText}`;
         this.time.title = playback.isPaused ? "Lecture paused" : "Lecture playing";
@@ -681,18 +627,16 @@ export class SidebarView
             this.lectureId.dataset.isAvailable = "true";
         }
 
-        this.downloadButton.disabled = !state.canDownload;
+        this.downloadButton.disabled = state.recordingStatus !== "ready";
 
-        if (state.canDownload)
+        if (state.recordingStatus === "ready")
         {
-            const preferredLabel = state.mediaOptions.find((option) => !option.isExpired)?.label;
-            this.mediaStatus.textContent = preferredLabel ?? "Recording ready";
+            this.mediaStatus.textContent = "Recording ready";
             this.downloadButton.title = "Download the detected authorized recording";
             return;
         }
 
-        const hasExpiredMedia = state.mediaOptions.some((option) => option.isExpired);
-        this.mediaStatus.textContent = hasExpiredMedia
+        this.mediaStatus.textContent = state.recordingStatus === "expired"
             ? "Media link expired — replay or reload to renew"
             : "Start playback to detect authorized media";
         this.downloadButton.title = this.mediaStatus.textContent;
@@ -713,7 +657,7 @@ export class SidebarView
     {
         if (status === null)
         {
-            this.tutorStatus.textContent = fallbackMessage ?? "Phase 2 evidence status unavailable";
+            this.tutorStatus.textContent = fallbackMessage ?? "Lecture evidence status unavailable";
             this.tutorStatus.removeAttribute("data-status");
             this.tutorStatus.removeAttribute("title");
             return;
@@ -787,19 +731,6 @@ export class SidebarView
             message.append(limitations);
         }
 
-        const trace = document.createElement("p");
-        trace.className = "trace";
-        const cost = answer.cost.estimatedCostUsd === null
-            ? "cost unpriced"
-            : `est. $${answer.cost.estimatedCostUsd.toFixed(6)}`;
-        trace.textContent = [
-            answer.cost.model,
-            `${answer.cost.inputTokens} in / ${answer.cost.outputTokens} out`,
-            cost,
-            `trace ${answer.cost.traceId.slice(0, 8)}`
-        ].join(" · ");
-        message.append(trace);
-
         this.messages.append(message);
         this.messages.scrollTop = this.messages.scrollHeight;
     }
@@ -808,8 +739,6 @@ export class SidebarView
     {
         this.isTutorBusy = isBusy;
         this.textarea.disabled = isBusy;
-        this.strategy.disabled = isBusy;
-        this.consentInput.disabled = isBusy;
         this.askButton.textContent = isBusy ? "Thinking…" : "Ask";
         this.updateAskAvailability();
     }
@@ -935,23 +864,18 @@ export class SidebarView
     {
         const question = this.textarea.value.trim();
 
-        if (question.length === 0 || !this.consentInput.checked || this.isTutorBusy)
+        if (question.length === 0 || this.isTutorBusy)
         {
             return;
         }
 
         this.textarea.value = "";
-        const strategy = this.strategy.value === "transcriptOnly"
-            ? "transcriptOnly"
-            : "multimodal";
-        this.callbacks.onQuestion(question, this.playback, strategy);
+        this.callbacks.onQuestion(question);
     }
 
     private updateAskAvailability(): void
     {
-        this.askButton.disabled = this.isTutorBusy || !this.consentInput.checked;
-        this.askButton.title = this.consentInput.checked
-            ? "Ask about the current lecture moment"
-            : "Confirm evidence sharing before asking";
+        this.askButton.disabled = this.isTutorBusy;
+        this.askButton.title = "Ask about the current lecture moment";
     }
 }

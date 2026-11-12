@@ -1,34 +1,15 @@
-// Selects the active media element and emits current playback context.
+// Tracks and captures the UARK player's shared-screen video.
 
 import type { PlaybackSnapshot } from "../shared/protocol";
 
-export type playbackListener = (playback: PlaybackSnapshot) => void;
+type playbackListener = (playback: PlaybackSnapshot) => void;
 
-function getVisibleArea(element: HTMLMediaElement): number
+function getLectureVideo(): HTMLVideoElement | null
 {
-    const rectangle = element.getBoundingClientRect();
-    const visibleWidth = Math.max(0, Math.min(rectangle.right, window.innerWidth) - Math.max(rectangle.left, 0));
-    const visibleHeight = Math.max(0, Math.min(rectangle.bottom, window.innerHeight) - Math.max(rectangle.top, 0));
-    return visibleWidth * visibleHeight;
+    return document.querySelector<HTMLVideoElement>("[data-analytics-id=video-container] video");
 }
 
-function getBestMediaElement(): HTMLMediaElement | null
-{
-    const videos = Array.from(document.querySelectorAll("video"));
-
-    if (videos.length > 0)
-    {
-        // Prefer the video occupying the most visible screen area as the active player.
-        return videos.sort((first, second) =>
-        {
-            return getVisibleArea(second) - getVisibleArea(first);
-        })[0] ?? null;
-    }
-
-    return document.querySelector("audio");
-}
-
-function createSnapshot(mediaElement: HTMLMediaElement): PlaybackSnapshot
+function createSnapshot(mediaElement: HTMLVideoElement): PlaybackSnapshot
 {
     const currentTime = Number.isFinite(mediaElement.currentTime)
         ? Math.max(0, mediaElement.currentTime)
@@ -40,17 +21,13 @@ function createSnapshot(mediaElement: HTMLMediaElement): PlaybackSnapshot
     return {
         currentTime,
         duration,
-        isPaused: mediaElement.paused,
-        hasVideo: mediaElement instanceof HTMLVideoElement,
-        visibleArea: getVisibleArea(mediaElement),
-        capturedAt: Date.now()
+        isPaused: mediaElement.paused
     };
 }
 
 export class PlaybackTracker
 {
     private readonly listener: playbackListener;
-    private intervalId: number | null = null;
 
     constructor(listener: playbackListener)
     {
@@ -59,38 +36,32 @@ export class PlaybackTracker
 
     start(): void
     {
-        if (this.intervalId !== null)
-        {
-            return;
-        }
-
         this.capture();
-        this.intervalId = window.setInterval(() =>
+        window.setInterval(() =>
         {
             this.capture();
         }, 500);
     }
 
-    seek(seconds: number): boolean
+    seek(seconds: number): void
     {
-        const mediaElement = getBestMediaElement();
+        const mediaElement = getLectureVideo();
 
         if (mediaElement === null || !Number.isFinite(seconds))
         {
-            return false;
+            return;
         }
 
         const maximum = Number.isFinite(mediaElement.duration) ? mediaElement.duration : seconds;
         mediaElement.currentTime = Math.max(0, Math.min(seconds, maximum));
         this.capture();
-        return true;
     }
 
     captureCurrentFrame(): string | null
     {
-        const mediaElement = getBestMediaElement();
+        const mediaElement = getLectureVideo();
 
-        if (!(mediaElement instanceof HTMLVideoElement)
+        if (mediaElement === null
             || mediaElement.readyState < HTMLMediaElement.HAVE_CURRENT_DATA
             || mediaElement.videoWidth <= 0
             || mediaElement.videoHeight <= 0)
@@ -123,7 +94,7 @@ export class PlaybackTracker
 
     private capture(): void
     {
-        const mediaElement = getBestMediaElement();
+        const mediaElement = getLectureVideo();
 
         if (mediaElement !== null)
         {

@@ -1,115 +1,70 @@
 // Coordinates lecture identity, playback context, downloads, and sidebar state.
 
-import { detectLectureIdentity, type LectureIdentity } from "../shared/lectureIdentity";
-import { isLectureProcessingStatus } from "../shared/ingestion";
+import { getPageLectureId } from "../shared/lectureIdentity";
+import type { LectureProcessingStatus } from "../shared/ingestion";
 import { evaluateQuestionScope } from "../shared/questionScope";
 import {
-    isBackgroundNotification,
-    isBackgroundResponse,
-    isLectureState,
+    type backgroundNotification,
     type backgroundResponse,
     type contentRequest,
     type LectureState,
     type PlaybackSnapshot
 } from "../shared/protocol";
-import { isTutorAnswer, type tutorStrategy } from "../shared/tutor";
+import type { TutorAnswer } from "../shared/tutor";
 import { PlaybackTracker } from "./PlaybackTracker";
 import { SidebarView } from "./SidebarView";
 import { ToolbarController } from "./ToolbarController";
 
-function sendRequest(request: contentRequest): Promise<backgroundResponse>
+async function sendRequest(request: contentRequest): Promise<backgroundResponse>
 {
-    return new Promise((resolve) =>
+    try
     {
-        chrome.runtime.sendMessage(request, (response: unknown) =>
-        {
-            const error = chrome.runtime.lastError;
-
-            if (error !== undefined)
-            {
-                resolve({
-                    ok: false,
-                    error: {
-                        code: "unexpectedError",
-                        message: "The extension service is temporarily unavailable."
-                    }
-                });
-                return;
+        return await chrome.runtime.sendMessage(request) as backgroundResponse;
+    }
+    catch
+    {
+        return {
+            ok: false,
+            error: {
+                code: "unexpectedError",
+                message: "The extension service is temporarily unavailable."
             }
-
-            if (!isBackgroundResponse(response))
-            {
-                resolve({
-                    ok: false,
-                    error: {
-                        code: "unexpectedError",
-                        message: "The extension returned an invalid response."
-                    }
-                });
-                return;
-            }
-
-            resolve(response);
-        });
-    });
+        };
+    }
 }
 
 function getLectureTitle(): string
 {
-    const selectors = [
-        "[data-recording-title]",
-        "[data-session-title]",
-        "h1",
-        "title"
-    ];
-
-    for (const selector of selectors)
-    {
-        const element = document.querySelector(selector);
-        const title = element?.getAttribute("data-recording-title")
-            ?? element?.getAttribute("data-session-title")
-            ?? element?.textContent;
-
-        if (title !== null && title !== undefined && title.trim().length > 0)
-        {
-            return title.trim();
-        }
-    }
-
-    return "Class.com lecture";
+    return document.title || "UARK Class recording";
 }
 
 export class LectureController
 {
-    private identity: LectureIdentity;
     private lectureState: LectureState;
     private readonly sidebar: SidebarView;
     private readonly toolbar: ToolbarController;
     private readonly tracker: PlaybackTracker;
     private currentLocation = window.location.href;
     private latestPlayback: PlaybackSnapshot | null = null;
-    private lastPlaybackReportAt = 0;
 
     constructor()
     {
-        this.identity = detectLectureIdentity(new URL(window.location.href), document);
         this.lectureState = {
-            lectureId: this.identity.lectureId,
-            mediaOptions: [],
-            canDownload: false
+            lectureId: getPageLectureId(new URL(this.currentLocation)),
+            recordingStatus: "waiting"
         };
         this.sidebar = new SidebarView({
             onDownload: () =>
             {
                 void this.startDownload();
             },
-            onQuestion: (question, playback, strategy) =>
+            onQuestion: (question) =>
             {
-                void this.askQuestion(question, playback, strategy);
+                void this.askQuestion(question);
             },
             onSeek: (seconds) =>
             {
-                this.seek(seconds);
+                this.tracker.seek(seconds);
             }
         });
         this.toolbar = new ToolbarController({
@@ -150,28 +105,13 @@ export class LectureController
 
     private installMessageListener(): void
     {
-        chrome.runtime.onMessage.addListener((message: unknown) =>
+        chrome.runtime.onMessage.addListener((message: backgroundNotification) =>
         {
-            if (!isBackgroundNotification(message))
-            {
-                return false;
-            }
-
             switch (message.kind)
             {
                 case "mediaAvailabilityChanged":
                 {
                     void this.refreshLectureState();
-                    break;
-                }
-                case "playbackChanged":
-                {
-                    this.handlePlayback(message.playback, false);
-                    break;
-                }
-                case "seekPlayback":
-                {
-                    this.tracker.seek(message.seconds);
                     break;
                 }
                 case "downloadStatusChanged":
@@ -190,49 +130,27 @@ export class LectureController
         });
     }
 
-    private handlePlayback(playback: PlaybackSnapshot, shouldReport: boolean = true): void
+    private handlePlayback(playback: PlaybackSnapshot): void
     {
-        // Keep the snapshot from the active-looking player and ignore noisier iframe updates.
-        const shouldUsePlayback = this.latestPlayback === null
-            || (playback.hasVideo && !this.latestPlayback.hasVideo)
-            || (!playback.isPaused && this.latestPlayback.isPaused)
-            || playback.visibleArea >= this.latestPlayback.visibleArea
-            || playback.capturedAt - this.latestPlayback.capturedAt > 2000;
-
-        if (!shouldUsePlayback)
-        {
-            return;
-        }
-
         this.latestPlayback = playback;
         this.sidebar.setPlayback(playback);
-
-        if (shouldReport && playback.capturedAt - this.lastPlaybackReportAt >= 1000)
-        {
-            // The UI samples frequently, but the background worker only needs one update per second.
-            this.lastPlaybackReportAt = playback.capturedAt;
-            void sendRequest({
-                kind: "reportPlayback",
-                playback
-            });
-        }
     }
 
     private async refreshLectureState(): Promise<void>
     {
         const response = await sendRequest({
             kind: "getLectureState",
-            pageLectureId: this.identity.lectureId
+            lectureId: getPageLectureId(new URL(this.currentLocation))
         });
 
-        if (!response.ok || !isLectureState(response.data))
+        if (!response.ok)
         {
             return;
         }
 
-        this.lectureState = response.data;
-        this.sidebar.setLectureState(response.data);
-        this.toolbar.setCanDownload(response.data.canDownload);
+        this.lectureState = response.data as LectureState;
+        this.sidebar.setLectureState(this.lectureState);
+        this.toolbar.setCanDownload(this.lectureState.recordingStatus === "ready");
     }
 
     private async startDownload(): Promise<void>
@@ -271,19 +189,12 @@ export class LectureController
             return;
         }
 
-        if (isLectureProcessingStatus(response.data))
-        {
-            this.sidebar.setTutorStatus(response.data);
-        }
+        this.sidebar.setTutorStatus(response.data as LectureProcessingStatus);
     }
 
-    private async askQuestion(
-        question: string,
-        playback: PlaybackSnapshot | null,
-        strategy: tutorStrategy
-    ): Promise<void>
+    private async askQuestion(question: string): Promise<void>
     {
-        const timestamp = playback?.currentTime ?? this.latestPlayback?.currentTime;
+        const timestamp = this.latestPlayback?.currentTime;
         this.sidebar.addMessage("user", question, timestamp);
 
         if (timestamp === undefined)
@@ -323,10 +234,7 @@ export class LectureController
                     lectureId: this.lectureState.lectureId,
                     timestampSeconds: timestamp,
                     question,
-                    strategy,
-                    currentFrameDataUrl: strategy === "multimodal"
-                        ? this.tracker.captureCurrentFrame()
-                        : null
+                    currentFrameDataUrl: this.tracker.captureCurrentFrame()
                 }
             });
 
@@ -337,33 +245,11 @@ export class LectureController
                 return;
             }
 
-            if (!isTutorAnswer(response.data))
-            {
-                this.sidebar.addMessage(
-                    "assistant",
-                    "The tutor returned an invalid answer. Check the local API and try again."
-                );
-                return;
-            }
-
-            this.sidebar.addTutorAnswer(response.data);
+            this.sidebar.addTutorAnswer(response.data as TutorAnswer);
         }
         finally
         {
             this.sidebar.setTutorBusy(false);
-        }
-    }
-
-    private seek(seconds: number): void
-    {
-        const didSeekLocally = this.tracker.seek(seconds);
-
-        if (!didSeekLocally)
-        {
-            void sendRequest({
-                kind: "seekPlayback",
-                seconds
-            });
         }
     }
 
@@ -375,22 +261,16 @@ export class LectureController
         }
 
         this.currentLocation = window.location.href;
-        const changedAt = Date.now();
-        this.identity = detectLectureIdentity(new URL(this.currentLocation), document);
         this.lectureState = {
-            lectureId: this.identity.lectureId,
-            mediaOptions: [],
-            canDownload: false
+            lectureId: getPageLectureId(new URL(this.currentLocation)),
+            recordingStatus: "waiting"
         };
         this.latestPlayback = null;
         this.sidebar.setLectureTitle(getLectureTitle());
         this.sidebar.setLectureState(this.lectureState);
         this.sidebar.setTutorStatus(null);
         this.toolbar.setCanDownload(false);
-        void sendRequest({ kind: "resetPageState", changedAt }).then(() =>
-        {
-            return this.refreshLectureState();
-        }).then(() =>
+        void this.refreshLectureState().then(() =>
         {
             return this.refreshTutorStatus();
         });

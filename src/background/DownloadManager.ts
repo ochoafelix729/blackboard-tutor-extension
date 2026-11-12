@@ -1,12 +1,11 @@
 // Starts lecture downloads and reports their lifecycle to the active tab.
 
 import type { backgroundNotification } from "../shared/protocol";
-import type { ObservedMedia } from "../shared/media";
+import type { ObservedRecording } from "../shared/media";
 
 interface ActiveDownload
 {
     tabId: number;
-    lectureId: string;
 }
 
 type activeDownloadMap = Record<string, ActiveDownload>;
@@ -23,57 +22,6 @@ function sanitizeFilenamePart(value: string): string
         .slice(0, 120);
 
     return sanitized.length > 0 ? sanitized : "lecture";
-}
-
-function getKindSuffix(media: ObservedMedia): string
-{
-    switch (media.kind)
-    {
-        case "sharedScreen":
-        {
-            return "shared-screen";
-        }
-        case "speaker":
-        {
-            return "speaker";
-        }
-        case "gallery":
-        {
-            return "gallery";
-        }
-        case "recording":
-        {
-            return "recording";
-        }
-    }
-}
-
-function normalizeActiveDownloads(value: unknown): activeDownloadMap
-{
-    if (typeof value !== "object" || value === null)
-    {
-        return {};
-    }
-
-    const normalized: activeDownloadMap = {};
-
-    for (const [downloadId, candidate] of Object.entries(value))
-    {
-        if (typeof candidate === "object" && candidate !== null)
-        {
-            const entry = candidate as Partial<ActiveDownload>;
-
-            if (typeof entry.tabId === "number" && typeof entry.lectureId === "string")
-            {
-                normalized[downloadId] = {
-                    tabId: entry.tabId,
-                    lectureId: entry.lectureId
-                };
-            }
-        }
-    }
-
-    return normalized;
 }
 
 function notifyTab(tabId: number, notification: backgroundNotification): void
@@ -97,41 +45,26 @@ export class DownloadManager
         });
     }
 
-    async start(tabId: number, media: ObservedMedia, lectureTitle: string): Promise<number>
+    async start(tabId: number, recording: ObservedRecording, lectureTitle: string): Promise<number>
     {
         await this.ensureLoaded();
 
-        const filename = `${sanitizeFilenamePart(lectureTitle)}-${getKindSuffix(media)}.mp4`;
+        const filename = `${sanitizeFilenamePart(lectureTitle)}.mp4`;
         notifyTab(tabId, {
             kind: "downloadStatusChanged",
             status: "starting",
             message: "Starting download…"
         });
 
-        const downloadId = await new Promise<number>((resolve, reject) =>
-        {
-            chrome.downloads.download({
-                url: media.url,
-                filename,
-                conflictAction: "uniquify",
-                saveAs: false
-            }, (createdDownloadId) =>
-            {
-                const error = chrome.runtime.lastError;
-
-                if (error !== undefined || createdDownloadId === undefined)
-                {
-                    reject(new Error(error?.message ?? "Chrome did not create the download."));
-                    return;
-                }
-
-                resolve(createdDownloadId);
-            });
+        const downloadId = await chrome.downloads.download({
+            url: recording.url,
+            filename,
+            conflictAction: "uniquify",
+            saveAs: false
         });
 
         this.activeDownloads[String(downloadId)] = {
-            tabId,
-            lectureId: media.lectureId
+            tabId
         };
         await this.persist();
         notifyTab(tabId, {
@@ -176,27 +109,17 @@ export class DownloadManager
     {
         if (this.loadPromise === null)
         {
-            this.loadPromise = new Promise((resolve) =>
+            this.loadPromise = chrome.storage.session.get(activeDownloadsStorageKey).then((result) =>
             {
-                chrome.storage.session.get(activeDownloadsStorageKey, (result) =>
-                {
-                    this.activeDownloads = normalizeActiveDownloads(result[activeDownloadsStorageKey]);
-                    resolve();
-                });
+                this.activeDownloads = (result[activeDownloadsStorageKey] as activeDownloadMap | undefined) ?? {};
             });
         }
 
         await this.loadPromise;
     }
 
-    private async persist(): Promise<void>
+    private persist(): Promise<void>
     {
-        await new Promise<void>((resolve) =>
-        {
-            chrome.storage.session.set({ [activeDownloadsStorageKey]: this.activeDownloads }, () =>
-            {
-                resolve();
-            });
-        });
+        return chrome.storage.session.set({ [activeDownloadsStorageKey]: this.activeDownloads });
     }
 }

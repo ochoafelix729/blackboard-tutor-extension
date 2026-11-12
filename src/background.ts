@@ -1,44 +1,31 @@
-// Coordinates media observation, playback messaging, and downloads in the service worker.
+// Observes UARK shared-screen recordings, starts downloads, and calls the local tutor API.
 
 import { DownloadManager } from "./background/DownloadManager";
-import { MediaStore } from "./background/MediaStore";
+import { RecordingStore } from "./background/RecordingStore";
 import { TutorApiClient } from "./background/TutorApiClient";
-import { isMediaExpired, parseObservedMedia, selectPreferredMedia } from "./shared/media";
-import { evaluateQuestionScope } from "./shared/questionScope";
+import { isRecordingExpired, parseObservedRecording, type ObservedRecording } from "./shared/media";
 import {
-    isContentRequest,
     type backgroundNotification,
     type backgroundResponse,
     type contentRequest,
     type ExtensionError,
-    type LectureState,
-    type MediaOption,
-    type PlaybackSnapshot
+    type LectureState
 } from "./shared/protocol";
 
-const observedMediaStore = new MediaStore();
-const lectureDownloadManager = new DownloadManager();
+const recordingStore = new RecordingStore();
+const downloadManager = new DownloadManager();
 const tutorApiClient = new TutorApiClient();
-interface TabPlayback
+
+function createErrorResponse(code: ExtensionError["code"], message: string): backgroundResponse
 {
-    frameId: number;
-    playback: PlaybackSnapshot;
+    return { ok: false, error: { code, message } };
 }
 
-const playbackByTab = new Map<number, TabPlayback>();
-
-function createErrorResponse(
-    code: ExtensionError["code"],
-    message: string
-): backgroundResponse
+function createRecordingError(recording: ObservedRecording | null): backgroundResponse
 {
-    return {
-        ok: false,
-        error: {
-            code,
-            message
-        }
-    };
+    return recording === null
+        ? createErrorResponse("mediaUnavailable", "Start lecture playback to detect its shared-screen recording.")
+        : createErrorResponse("signedUrlExpired", "The recording link expired. Replay or reload the lecture to renew it.");
 }
 
 function notifyTopFrame(tabId: number, notification: backgroundNotification): void
@@ -49,206 +36,91 @@ function notifyTopFrame(tabId: number, notification: backgroundNotification): vo
     });
 }
 
-async function observeMediaRequest(details: chrome.webRequest.OnBeforeRequestDetails): Promise<void>
+async function observeRecordingRequest(details: chrome.webRequest.OnBeforeRequestDetails): Promise<void>
 {
-    if (details.tabId < 0 || details.method !== "GET")
+    if (details.tabId < 0
+        || details.frameId !== 0
+        || details.initiator !== "https://uark.class.com"
+        || details.method !== "GET")
     {
         return;
     }
 
-    const documentId = "documentId" in details && typeof details.documentId === "string"
-        ? details.documentId
-        : null;
-    const media = parseObservedMedia(details.url, Date.now(), documentId);
+    const recording = parseObservedRecording(details.url);
 
-    if (media === null)
+    if (recording !== null)
     {
-        return;
+        await recordingStore.record(details.tabId, recording);
+        notifyTopFrame(details.tabId, { kind: "mediaAvailabilityChanged" });
     }
-
-    await observedMediaStore.record(details.tabId, media);
-    notifyTopFrame(details.tabId, { kind: "mediaAvailabilityChanged" });
-}
-
-function handleObservedRequest(
-    details: chrome.webRequest.OnBeforeRequestDetails
-): chrome.webRequest.BlockingResponse
-{
-    void observeMediaRequest(details);
-    return {};
 }
 
 chrome.webRequest.onBeforeRequest.addListener(
-    handleObservedRequest,
+    (details) =>
+    {
+        void observeRecordingRequest(details);
+        return undefined;
+    },
     {
         urls: ["https://*.class.com/*"],
         types: ["media", "xmlhttprequest"]
     }
 );
 
-function chooseCurrentLectureId(
-    mediaCandidates: Awaited<ReturnType<MediaStore["getForTab"]>>,
-    pageLectureId: string | null
-): string | null
-{
-    if (pageLectureId !== null && mediaCandidates.some((candidate) => candidate.lectureId === pageLectureId))
-    {
-        return pageLectureId;
-    }
-
-    return mediaCandidates[0]?.lectureId ?? pageLectureId;
-}
-
-function createLectureState(
-    mediaCandidates: Awaited<ReturnType<MediaStore["getForTab"]>>,
-    pageLectureId: string | null
-): LectureState
-{
-    const lectureId = chooseCurrentLectureId(mediaCandidates, pageLectureId);
-    const relevantCandidates = mediaCandidates.filter((candidate) =>
-    {
-        return candidate.lectureId === lectureId;
-    });
-    const mediaOptions: MediaOption[] = relevantCandidates.map((candidate) =>
-    {
-        return {
-            assetKey: candidate.assetKey,
-            kind: candidate.kind,
-            label: candidate.label,
-            expiresAt: candidate.expiresAt,
-            isExpired: isMediaExpired(candidate)
-        };
-    });
-
-    return {
-        lectureId,
-        mediaOptions,
-        canDownload: selectPreferredMedia(relevantCandidates, lectureId) !== null
-    };
-}
-
 async function getLectureState(
     tabId: number,
-    documentId: string | null,
-    pageLectureId: string | null
+    lectureId: string | null
 ): Promise<backgroundResponse>
 {
-    const mediaCandidates = await observedMediaStore.getForTab(tabId, documentId);
-
-    return {
-        ok: true,
-        data: createLectureState(mediaCandidates, pageLectureId)
+    const recording = await recordingStore.getForTab(tabId, lectureId);
+    const state: LectureState = {
+        lectureId,
+        recordingStatus: recording === null ? "waiting" : isRecordingExpired(recording) ? "expired" : "ready"
     };
+    return { ok: true, data: state };
 }
 
 async function startDownload(
     tabId: number,
-    documentId: string | null,
     request: Extract<contentRequest, { kind: "startDownload" }>
 ): Promise<backgroundResponse>
 {
-    const mediaCandidates = await observedMediaStore.getForTab(tabId, documentId);
-    const selectedMedia = selectPreferredMedia(mediaCandidates, request.lectureId);
+    const recording = await recordingStore.getForTab(tabId, request.lectureId);
 
-    if (selectedMedia === null)
+    if (recording === null || isRecordingExpired(recording))
     {
-        const hasExpiredMedia = mediaCandidates.some((candidate) =>
-        {
-            return (request.lectureId === null || candidate.lectureId === request.lectureId)
-                && isMediaExpired(candidate);
-        });
-
-        if (hasExpiredMedia)
-        {
-            return createErrorResponse(
-                "signedUrlExpired",
-                "The recording link expired. Replay or reload the lecture to renew it, then try again."
-            );
-        }
-
-        return createErrorResponse(
-            "mediaUnavailable",
-            "No downloadable recording is available yet. Start lecture playback and try again."
-        );
+        return createRecordingError(recording);
     }
 
     try
     {
-        const downloadId = await lectureDownloadManager.start(tabId, selectedMedia, request.lectureTitle);
-
-        return {
-            ok: true,
-            data: { downloadId }
-        };
+        const downloadId = await downloadManager.start(tabId, recording, request.lectureTitle);
+        return { ok: true, data: { downloadId } };
     }
     catch
     {
-        return createErrorResponse(
-            "downloadFailed",
-            "Chrome could not start the download. Replay or reload the lecture and try again."
-        );
+        return createErrorResponse("downloadFailed", "Chrome could not start the download. Reload the recording and try again.");
     }
 }
 
-async function registerTutorLecture(
+async function askTutor(
     tabId: number,
-    documentId: string | null,
     request: Extract<contentRequest, { kind: "askTutor" }>
 ): Promise<backgroundResponse>
 {
-    const mediaCandidates = await observedMediaStore.getForTab(tabId, documentId);
-    const selectedMedia = selectPreferredMedia(mediaCandidates, request.question.lectureId);
+    const recording = await recordingStore.getForTab(tabId, request.question.lectureId);
 
-    if (selectedMedia === null)
+    if (recording === null || isRecordingExpired(recording))
     {
-        return createErrorResponse(
-            "mediaUnavailable",
-            "Start lecture playback so its authorized recording can be processed automatically."
-        );
+        return createRecordingError(recording);
     }
 
-    const result = await tutorApiClient.registerLecture(
+    const registration = await tutorApiClient.registerLecture(
         request.question.lectureId,
         request.lectureTitle,
-        selectedMedia.url
+        recording.url
     );
-
-    if (!result.ok)
-    {
-        return {
-            ok: false,
-            error: result.error
-        };
-    }
-
-    return { ok: true };
-}
-
-function relayPlayback(tabId: number, frameId: number, playback: PlaybackSnapshot): void
-{
-    const previous = playbackByTab.get(tabId);
-    // Choose the most useful frame's snapshot instead of letting every iframe overwrite it.
-    const shouldReplace = previous === undefined
-        || previous.frameId === frameId
-        || (playback.hasVideo && !previous.playback.hasVideo)
-        || (!playback.isPaused && previous.playback.isPaused)
-        || playback.visibleArea > previous.playback.visibleArea
-        || playback.capturedAt - previous.playback.capturedAt > 2_000;
-
-    if (!shouldReplace)
-    {
-        return;
-    }
-
-    playbackByTab.set(tabId, { frameId, playback });
-
-    if (frameId !== 0)
-    {
-        notifyTopFrame(tabId, {
-            kind: "playbackChanged",
-            playback
-        });
-    }
+    return registration.ok ? tutorApiClient.ask(request.question) : registration;
 }
 
 async function handleContentRequest(
@@ -263,107 +135,31 @@ async function handleContentRequest(
         return createErrorResponse("invalidRequest", "The request is not associated with a browser tab.");
     }
 
-    const documentId = typeof sender.documentId === "string" ? sender.documentId : null;
-
     switch (request.kind)
     {
         case "getLectureState":
         {
-            return getLectureState(tabId, documentId, request.pageLectureId);
+            return getLectureState(tabId, request.lectureId);
         }
         case "startDownload":
         {
-            return startDownload(tabId, documentId, request);
-        }
-        case "reportPlayback":
-        {
-            relayPlayback(tabId, sender.frameId ?? 0, request.playback);
-            return { ok: true };
-        }
-        case "resetPageState":
-        {
-            // Navigation invalidates both the old playback winner and old media requests.
-            playbackByTab.delete(tabId);
-            await observedMediaStore.clearObservedBefore(tabId, request.changedAt);
-            return { ok: true };
-        }
-        case "seekPlayback":
-        {
-            chrome.tabs.sendMessage(tabId, {
-                kind: "seekPlayback",
-                seconds: request.seconds
-            } satisfies backgroundNotification, () =>
-            {
-                void chrome.runtime.lastError;
-            });
-            return { ok: true };
+            return startDownload(tabId, request);
         }
         case "askTutor":
         {
-            const scopeDecision = evaluateQuestionScope(
-                request.question.question,
-                request.question.timestampSeconds
-            );
-
-            if (!scopeDecision.isAllowed)
-            {
-                return createErrorResponse("questionOutOfScope", scopeDecision.message);
-            }
-
-            const registration = await registerTutorLecture(tabId, documentId, request);
-
-            if (!registration.ok)
-            {
-                return registration;
-            }
-
-            const result = await tutorApiClient.ask(request.question);
-
-            if (!result.ok)
-            {
-                return {
-                    ok: false,
-                    error: result.error
-                };
-            }
-
-            return {
-                ok: true,
-                data: result.answer
-            };
+            return askTutor(tabId, request);
         }
         case "getTutorStatus":
         {
-            const result = await tutorApiClient.getStatus(request.lectureId);
-
-            if (!result.ok)
-            {
-                return {
-                    ok: false,
-                    error: result.error
-                };
-            }
-
-            return {
-                ok: true,
-                data: result.status
-            };
+            return tutorApiClient.getStatus(request.lectureId);
         }
     }
 }
 
-chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =>
+chrome.runtime.onMessage.addListener((message: contentRequest, sender, sendResponse) =>
 {
-    if (!isContentRequest(message))
-    {
-        return false;
-    }
-
     void handleContentRequest(message, sender)
-        .then((response) =>
-        {
-            sendResponse(response);
-        })
+        .then(sendResponse)
         .catch(() =>
         {
             sendResponse(createErrorResponse("unexpectedError", "The extension could not complete the request."));
@@ -374,6 +170,5 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =>
 
 chrome.tabs.onRemoved.addListener((tabId) =>
 {
-    playbackByTab.delete(tabId);
-    void observedMediaStore.clearTab(tabId);
+    void recordingStore.clearTab(tabId);
 });

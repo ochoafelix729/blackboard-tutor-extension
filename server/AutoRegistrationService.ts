@@ -48,6 +48,7 @@ export class AutoRegistrationService
     private readonly store: LectureStore;
     private readonly pipeline: IngestionPipeline;
     private currentRun: LectureProcessingStatus | null = null;
+    private acquisitionStartedAt = 0;
 
     constructor(
         store: LectureStore,
@@ -89,6 +90,7 @@ export class AutoRegistrationService
             "processing",
             existingStatus === null ? "Acquiring the recording for local processing." : "Preparing lecture evidence."
         );
+        this.acquisitionStartedAt = Date.now();
         this.currentRun = status;
         void this.prepareLecture(request, title).then(() =>
         {
@@ -97,6 +99,14 @@ export class AutoRegistrationService
         {
             const message = error instanceof Error ? error.message : "Lecture processing failed.";
             this.currentRun = createAcquisitionStatus(request.lectureId, title, "failed", message);
+
+            if (this.store.getLecture(request.lectureId) === null)
+            {
+                this.currentRun.acquisitionDurationMilliseconds = Date.now() - this.acquisitionStartedAt;
+                console.error("Lecture acquisition failed", {
+                    durationMilliseconds: this.currentRun.acquisitionDurationMilliseconds
+                });
+            }
         });
         return status;
     }
@@ -113,17 +123,18 @@ export class AutoRegistrationService
 
         if (storedStatus === null)
         {
-            return run;
+            return {
+                ...run,
+                ...(run.status === "processing" ? {
+                    acquisitionDurationMilliseconds: Date.now() - this.acquisitionStartedAt
+                } : {})
+            };
         }
 
         return {
             ...storedStatus,
             status: run.status,
-            message: run.status === "failed"
-                ? run.message
-                : storedStatus.capabilities.hasTranscript
-                    ? "Transcript ready. Preparing the remaining lecture evidence."
-                    : "Preparing lecture evidence."
+            message: run.status === "failed" ? run.message : storedStatus.message
         };
     }
 
@@ -136,6 +147,7 @@ export class AutoRegistrationService
 
     private async acquireAndRegister(request: AutoRegistrationRequest, title: string): Promise<LectureRecord>
     {
+        const startedAt = Date.now();
         await fileSystem.mkdir(this.store.getLectureDirectory(request.lectureId), { recursive: true });
         const response = await fetch(request.mediaUrl);
 
@@ -148,6 +160,8 @@ export class AutoRegistrationService
             Readable.fromWeb(response.body as ReadableStream<Uint8Array>),
             createWriteStream(this.store.getRecordingPath(request.lectureId))
         );
-        return this.store.registerLecture(request.lectureId, title);
+        const durationMilliseconds = Date.now() - startedAt;
+        console.info("Lecture acquisition completed", { durationMilliseconds });
+        return this.store.registerLecture(request.lectureId, title, durationMilliseconds);
     }
 }

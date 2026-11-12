@@ -2,7 +2,13 @@
 
 import { promises as fileSystem } from "node:fs";
 import path from "node:path";
-import { processingStages, type LectureProcessingStatus, type processingStage, type processingStatus } from "../src/shared/ingestion";
+import {
+    processingStages,
+    type LectureProcessingStatus,
+    type processingStage,
+    type processingStatus,
+    type TranscriptProgress
+} from "../src/shared/ingestion";
 import type { LectureRecord } from "./ingestionTypes";
 
 export class LectureStore
@@ -37,6 +43,7 @@ export class LectureStore
             {
                 if (stage.status === "processing")
                 {
+                    delete stage.startedAt;
                     stage.status = "notStarted";
                 }
             }
@@ -50,13 +57,23 @@ export class LectureStore
         return this.lectures[lectureId] ?? null;
     }
 
-    async registerLecture(lectureId: string, title: string): Promise<LectureRecord>
+    async registerLecture(
+        lectureId: string,
+        title: string,
+        acquisitionDurationMilliseconds: number
+    ): Promise<LectureRecord>
     {
         const stages = Object.fromEntries(processingStages.map((stage) =>
         {
             return [stage, { status: "notStarted", error: null }];
         })) as LectureRecord["stages"];
-        const lecture: LectureRecord = { lectureId, title, durationSeconds: null, stages };
+        const lecture: LectureRecord = {
+            lectureId,
+            title,
+            durationSeconds: null,
+            stages,
+            acquisitionDurationMilliseconds
+        };
         this.lectures[lectureId] = lecture;
         await fileSystem.mkdir(this.getLectureDirectory(lectureId), { recursive: true });
         await this.save();
@@ -72,7 +89,17 @@ export class LectureStore
             return null;
         }
 
-        const stages = processingStages.map((stage) => ({ stage, ...lecture.stages[stage] }));
+        const stages = processingStages.map((stage) =>
+        {
+            const record = lecture.stages[stage];
+            return {
+                stage,
+                ...record,
+                ...(record.startedAt === undefined ? {} : {
+                    durationMilliseconds: (record.durationMilliseconds ?? 0) + Date.now() - record.startedAt
+                })
+            };
+        });
         let status: processingStatus = "notStarted";
 
         if (stages.every((stage) => stage.status === "ready"))
@@ -90,9 +117,13 @@ export class LectureStore
 
         const messages = {
             ready: "Lecture evidence is ready.",
-            processing: "Preparing lecture evidence.",
+            processing: lecture.stages.transcript.status === "processing"
+                ? "Transcribing lecture audio. Completed portions become available as processing continues."
+                : lecture.stages.transcript.status === "ready"
+                    ? "Transcript ready. Preparing the remaining lecture evidence."
+                    : "Preparing lecture evidence.",
             failed: "Lecture processing failed. Ask again to retry the unfinished stages.",
-            notStarted: "Ask a question to prepare this lecture."
+            notStarted: "Lecture preparation will start when authorized media is detected."
         };
         return {
             lectureId,
@@ -100,12 +131,17 @@ export class LectureStore
             status,
             stages,
             capabilities: {
-                hasTranscript: lecture.stages.transcript.status === "ready",
+                hasTranscript: lecture.stages.transcript.status === "ready"
+                    || (lecture.transcriptProgress?.segmentCount ?? 0) > 0,
                 hasVisuals: lecture.stages.visuals.status === "ready",
                 hasSegments: lecture.stages.segments.status === "ready",
                 hasSemanticSearch: lecture.stages.embeddings.status === "ready"
             },
-            message: messages[status]
+            message: messages[status],
+            ...(lecture.transcriptProgress === undefined ? {} : { transcriptProgress: lecture.transcriptProgress }),
+            ...(lecture.acquisitionDurationMilliseconds === undefined ? {} : {
+                acquisitionDurationMilliseconds: lecture.acquisitionDurationMilliseconds
+            })
         };
     }
 
@@ -116,7 +152,30 @@ export class LectureStore
         error: string | null = null
     ): Promise<void>
     {
-        lecture.stages[stage] = { status, error };
+        const previous = lecture.stages[stage];
+        const durationMilliseconds = (previous.durationMilliseconds ?? 0)
+            + (previous.startedAt === undefined ? 0 : Date.now() - previous.startedAt);
+        lecture.stages[stage] = {
+            status,
+            error,
+            durationMilliseconds,
+            ...(status === "processing" ? { startedAt: Date.now() } : {})
+        };
+        await this.save();
+    }
+
+    async setTranscriptProgress(lecture: LectureRecord, progress: TranscriptProgress): Promise<void>
+    {
+        const transcript = lecture.stages.transcript;
+
+        if (transcript.startedAt !== undefined)
+        {
+            const now = Date.now();
+            transcript.durationMilliseconds = (transcript.durationMilliseconds ?? 0) + now - transcript.startedAt;
+            transcript.startedAt = now;
+        }
+
+        lecture.transcriptProgress = progress;
         await this.save();
     }
 
@@ -126,12 +185,11 @@ export class LectureStore
         await this.save();
     }
 
-    writeArtifact(lectureId: string, kind: processingStage, value: unknown): Promise<void>
+    async writeArtifact(lectureId: string, kind: processingStage, value: unknown): Promise<void>
     {
-        return fileSystem.writeFile(
-            path.join(this.getLectureDirectory(lectureId), `${kind}.json`),
-            JSON.stringify(value)
-        );
+        const artifactPath = path.join(this.getLectureDirectory(lectureId), `${kind}.json`);
+        await fileSystem.writeFile(`${artifactPath}.tmp`, JSON.stringify(value));
+        await fileSystem.rename(`${artifactPath}.tmp`, artifactPath);
     }
 
     async readArtifact<valueType>(lectureId: string, kind: processingStage): Promise<valueType | null>

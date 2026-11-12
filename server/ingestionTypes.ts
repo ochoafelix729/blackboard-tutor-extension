@@ -1,11 +1,13 @@
 // Defines local lecture, stage, artifact, and indexed-evidence records.
 
-import type { processingStage, processingStatus } from "../src/shared/ingestion";
+import type { processingStage, processingStatus, TranscriptProgress } from "../src/shared/ingestion";
 
 export interface StageRecord
 {
     status: processingStatus;
     error: string | null;
+    startedAt?: number;
+    durationMilliseconds?: number;
 }
 
 export interface LectureRecord
@@ -14,6 +16,8 @@ export interface LectureRecord
     title: string;
     durationSeconds: number | null;
     stages: Record<processingStage, StageRecord>;
+    transcriptProgress?: TranscriptProgress;
+    acquisitionDurationMilliseconds?: number;
 }
 
 export interface TranscriptSegment
@@ -27,6 +31,7 @@ export interface TranscriptSegment
 export interface TranscriptArtifact
 {
     segments: TranscriptSegment[];
+    processedThroughSeconds?: number;
 }
 
 export interface VisualEvidence

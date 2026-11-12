@@ -31,7 +31,15 @@ Open a recording at `https://uark.class.com/player/recording/...` and begin play
 - Questions automatically use timestamped transcript evidence, representative lecture frames, and a capture of the shared-screen video when available. The instructor video is separate and is not selected for screenshots.
 - Timestamp citations jump back to the relevant point in the recording.
 
-The first question acquires the recording and starts local processing. The sidebar shows progress; ask again once transcript evidence is available. One lecture is prepared at a time, with stages run in order. Completed stages are reused across questions, tabs, refreshes, and API restarts. Asking again after a failure or restart resumes the unfinished stages. When visuals are unavailable, the tutor can answer from the transcript and reports that limitation.
+Opening a recording starts local preparation as soon as the extension detects its authorized shared-screen media URL; no question is required. If the player has not requested its media yet, begin playback to make it available. The API must be running; the extension checks again every five seconds if it is unavailable or another lecture is being prepared.
+
+The sidebar shows transcript coverage as processing continues. Two-minute audio portions are extracted, transcribed, and saved individually, so questions about completed portions can be answered before the full lecture finishes. A question beyond that coverage reports that its playback time is still being prepared. Representative frames, segments, and embeddings follow transcription; a current player capture can supply visuals while those stages run.
+
+One lecture is prepared at a time, with stages run in order. Completed stages and transcription portions are reused across questions, tabs, refreshes, and API restarts. Reopening the page resumes interrupted work; asking again after a failure retries unfinished work. When visuals are unavailable, the tutor can answer from the transcript and reports that limitation.
+
+Hover over the sidebar's processing status to see download and stage durations. The API also logs audio extraction and transcription durations for each portion, without lecture content or signed URLs. Older cached lectures do not have historical timings.
+
+The full recording download still precedes transcription. Preparing less audio before the first answer shortens the initial wait, but total processing time still depends on download speed, transcription requests, and video decoding. Using authorized platform captions, if available, is the next opportunity to avoid audio transcription entirely.
 
 Questions cover the current moment and at most the preceding 10 minutes. For full-lecture analysis, download the recording and use a chat model.
 

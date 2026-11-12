@@ -11,6 +11,15 @@ export interface StageProcessingStatus
     stage: processingStage;
     status: processingStatus;
     error: string | null;
+    startedAt?: number;
+    durationMilliseconds?: number;
+}
+
+export interface TranscriptProgress
+{
+    processedThroughSeconds: number;
+    durationSeconds: number;
+    segmentCount: number;
 }
 
 export interface LectureCapabilities
@@ -29,4 +38,6 @@ export interface LectureProcessingStatus
     stages: StageProcessingStatus[];
     capabilities: LectureCapabilities;
     message: string;
+    transcriptProgress?: TranscriptProgress;
+    acquisitionDurationMilliseconds?: number;
 }

@@ -133,7 +133,23 @@ export class TutorService
         {
             throw new TutorServiceError(
                 processingStatus?.status === "processing" ? "lectureProcessing" : "evidenceUnavailable",
-                processingStatus?.message ?? "Ask a question from the recording page to prepare this lecture."
+                processingStatus?.message ?? "Open the recording page to prepare this lecture."
+            );
+        }
+
+        const transcriptProgress = processingStatus.transcriptProgress;
+        const isTranscriptComplete = processingStatus.stages.some((stage) =>
+        {
+            return stage.stage === "transcript" && stage.status === "ready";
+        });
+
+        if (!isTranscriptComplete
+            && transcriptProgress !== undefined
+            && question.timestampSeconds > transcriptProgress.processedThroughSeconds)
+        {
+            throw new TutorServiceError(
+                processingStatus.status === "processing" ? "lectureProcessing" : "evidenceUnavailable",
+                "The transcript has not reached this playback time yet. " + processingStatus.message
             );
         }
 

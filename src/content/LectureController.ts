@@ -46,6 +46,8 @@ export class LectureController
     private readonly tracker: PlaybackTracker;
     private currentLocation = window.location.href;
     private latestPlayback: PlaybackSnapshot | null = null;
+    private preparedLectureId: string | null = null;
+    private readonly refreshingLectures = new Set<string | null>();
 
     constructor()
     {
@@ -98,9 +100,7 @@ export class LectureController
         window.setInterval(() =>
         {
             void this.refreshLectureState();
-            void this.refreshTutorStatus();
         }, 5000);
-        void this.refreshTutorStatus();
     }
 
     private installMessageListener(): void
@@ -138,19 +138,33 @@ export class LectureController
 
     private async refreshLectureState(): Promise<void>
     {
-        const response = await sendRequest({
-            kind: "getLectureState",
-            lectureId: getPageLectureId(new URL(this.currentLocation))
-        });
+        const lectureId = this.lectureState.lectureId;
 
-        if (!response.ok)
+        if (this.refreshingLectures.has(lectureId))
         {
             return;
         }
 
-        this.lectureState = response.data as LectureState;
-        this.sidebar.setLectureState(this.lectureState);
-        this.toolbar.setCanDownload(this.lectureState.recordingStatus === "ready");
+        this.refreshingLectures.add(lectureId);
+
+        try
+        {
+            const response = await sendRequest({ kind: "getLectureState", lectureId });
+
+            if (!response.ok || this.lectureState.lectureId !== lectureId)
+            {
+                return;
+            }
+
+            this.lectureState = response.data as LectureState;
+            this.sidebar.setLectureState(this.lectureState);
+            this.toolbar.setCanDownload(this.lectureState.recordingStatus === "ready");
+            await this.refreshTutorStatus();
+        }
+        finally
+        {
+            this.refreshingLectures.delete(lectureId);
+        }
     }
 
     private async startDownload(): Promise<void>
@@ -178,18 +192,40 @@ export class LectureController
             return;
         }
 
-        const response = await sendRequest({
-            kind: "getTutorStatus",
-            lectureId
-        });
+        const shouldPrepare = this.lectureState.recordingStatus === "ready"
+            && this.preparedLectureId !== lectureId;
+        const response = await sendRequest(shouldPrepare
+            ? { kind: "prepareTutor", lectureId, lectureTitle: getLectureTitle() }
+            : { kind: "getTutorStatus", lectureId });
 
-        if (!response.ok)
+        if (this.lectureState.lectureId !== lectureId)
         {
-            this.sidebar.setTutorStatus(null, response.error.message);
             return;
         }
 
-        this.sidebar.setTutorStatus(response.data as LectureProcessingStatus);
+        if (!response.ok)
+        {
+            const message = response.error.code === "evidenceUnavailable"
+                && this.lectureState.recordingStatus !== "ready"
+                ? "Waiting for authorized media to start lecture preparation."
+                : response.error.message;
+            this.sidebar.setTutorStatus(null, message);
+            return;
+        }
+
+        const status = response.data as LectureProcessingStatus;
+
+        if (shouldPrepare)
+        {
+            this.preparedLectureId = lectureId;
+        }
+        else if (status.status === "notStarted")
+        {
+            // An API restart resets interrupted stages; the next refresh resumes them.
+            this.preparedLectureId = null;
+        }
+
+        this.sidebar.setTutorStatus(status);
     }
 
     private async askQuestion(question: string): Promise<void>
@@ -266,13 +302,11 @@ export class LectureController
             recordingStatus: "waiting"
         };
         this.latestPlayback = null;
+        this.preparedLectureId = null;
         this.sidebar.setLectureTitle(getLectureTitle());
         this.sidebar.setLectureState(this.lectureState);
         this.sidebar.setTutorStatus(null);
         this.toolbar.setCanDownload(false);
-        void this.refreshLectureState().then(() =>
-        {
-            return this.refreshTutorStatus();
-        });
+        void this.refreshLectureState();
     }
 }

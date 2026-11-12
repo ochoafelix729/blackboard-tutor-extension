@@ -738,14 +738,23 @@
         return;
       }
       this.tutorStatus.dataset.status = status.status;
-      this.tutorStatus.textContent = status.message;
+      const transcriptProgress = status.transcriptProgress;
+      const isPartialTranscript = transcriptProgress !== void 0 && transcriptProgress.processedThroughSeconds < transcriptProgress.durationSeconds;
+      this.tutorStatus.textContent = isPartialTranscript ? `Transcript processed through ${formatTime(transcriptProgress.processedThroughSeconds)} / ${formatTime(transcriptProgress.durationSeconds)}. ${status.message}` : status.message;
       const readyCapabilities = [
         status.capabilities.hasTranscript ? "transcript" : null,
         status.capabilities.hasVisuals ? "visuals" : null,
         status.capabilities.hasSegments ? "segments" : null,
         status.capabilities.hasSemanticSearch ? "semantic search" : null
       ].filter((value) => value !== null);
-      this.tutorStatus.title = readyCapabilities.length > 0 ? `Ready: ${readyCapabilities.join(", ")}` : "No evidence stage is ready yet";
+      const readiness = readyCapabilities.length > 0 ? `Ready: ${readyCapabilities.join(", ")}` : "No evidence stage is ready yet";
+      const timings = status.stages.flatMap((stage) => {
+        return stage.durationMilliseconds === void 0 ? [] : [`${stage.stage}: ${(stage.durationMilliseconds / 1e3).toFixed(1)}s (${stage.status})`];
+      });
+      if (status.acquisitionDurationMilliseconds !== void 0) {
+        timings.unshift(`download: ${(status.acquisitionDurationMilliseconds / 1e3).toFixed(1)}s`);
+      }
+      this.tutorStatus.title = [readiness, ...timings].join("\n");
     }
     addMessage(role, text, timestampSeconds) {
       const message = document.createElement("div");
@@ -991,6 +1000,8 @@
     tracker;
     currentLocation = window.location.href;
     latestPlayback = null;
+    preparedLectureId = null;
+    refreshingLectures = /* @__PURE__ */ new Set();
     constructor() {
       this.lectureState = {
         lectureId: getPageLectureId(new URL(this.currentLocation)),
@@ -1030,9 +1041,7 @@
       }, 1e3);
       window.setInterval(() => {
         void this.refreshLectureState();
-        void this.refreshTutorStatus();
       }, 5e3);
-      void this.refreshTutorStatus();
     }
     installMessageListener() {
       chrome.runtime.onMessage.addListener((message) => {
@@ -1057,16 +1066,23 @@
       this.sidebar.setPlayback(playback);
     }
     async refreshLectureState() {
-      const response = await sendRequest({
-        kind: "getLectureState",
-        lectureId: getPageLectureId(new URL(this.currentLocation))
-      });
-      if (!response.ok) {
+      const lectureId = this.lectureState.lectureId;
+      if (this.refreshingLectures.has(lectureId)) {
         return;
       }
-      this.lectureState = response.data;
-      this.sidebar.setLectureState(this.lectureState);
-      this.toolbar.setCanDownload(this.lectureState.recordingStatus === "ready");
+      this.refreshingLectures.add(lectureId);
+      try {
+        const response = await sendRequest({ kind: "getLectureState", lectureId });
+        if (!response.ok || this.lectureState.lectureId !== lectureId) {
+          return;
+        }
+        this.lectureState = response.data;
+        this.sidebar.setLectureState(this.lectureState);
+        this.toolbar.setCanDownload(this.lectureState.recordingStatus === "ready");
+        await this.refreshTutorStatus();
+      } finally {
+        this.refreshingLectures.delete(lectureId);
+      }
     }
     async startDownload() {
       const response = await sendRequest({
@@ -1085,15 +1101,23 @@
         this.sidebar.setTutorStatus(null);
         return;
       }
-      const response = await sendRequest({
-        kind: "getTutorStatus",
-        lectureId
-      });
-      if (!response.ok) {
-        this.sidebar.setTutorStatus(null, response.error.message);
+      const shouldPrepare = this.lectureState.recordingStatus === "ready" && this.preparedLectureId !== lectureId;
+      const response = await sendRequest(shouldPrepare ? { kind: "prepareTutor", lectureId, lectureTitle: getLectureTitle() } : { kind: "getTutorStatus", lectureId });
+      if (this.lectureState.lectureId !== lectureId) {
         return;
       }
-      this.sidebar.setTutorStatus(response.data);
+      if (!response.ok) {
+        const message = response.error.code === "evidenceUnavailable" && this.lectureState.recordingStatus !== "ready" ? "Waiting for authorized media to start lecture preparation." : response.error.message;
+        this.sidebar.setTutorStatus(null, message);
+        return;
+      }
+      const status = response.data;
+      if (shouldPrepare) {
+        this.preparedLectureId = lectureId;
+      } else if (status.status === "notStarted") {
+        this.preparedLectureId = null;
+      }
+      this.sidebar.setTutorStatus(status);
     }
     async askQuestion(question) {
       const timestamp = this.latestPlayback?.currentTime;
@@ -1149,13 +1173,12 @@
         recordingStatus: "waiting"
       };
       this.latestPlayback = null;
+      this.preparedLectureId = null;
       this.sidebar.setLectureTitle(getLectureTitle());
       this.sidebar.setLectureState(this.lectureState);
       this.sidebar.setTutorStatus(null);
       this.toolbar.setCanDownload(false);
-      void this.refreshLectureState().then(() => {
-        return this.refreshTutorStatus();
-      });
+      void this.refreshLectureState();
     }
   };
 

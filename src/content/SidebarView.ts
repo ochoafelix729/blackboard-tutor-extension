@@ -664,16 +664,35 @@ export class SidebarView
         }
 
         this.tutorStatus.dataset.status = status.status;
-        this.tutorStatus.textContent = status.message;
+        const transcriptProgress = status.transcriptProgress;
+        const isPartialTranscript = transcriptProgress !== undefined
+            && transcriptProgress.processedThroughSeconds < transcriptProgress.durationSeconds;
+        this.tutorStatus.textContent = isPartialTranscript
+            ? `Transcript processed through ${formatTime(transcriptProgress.processedThroughSeconds)} / `
+                + `${formatTime(transcriptProgress.durationSeconds)}. ${status.message}`
+            : status.message;
         const readyCapabilities = [
             status.capabilities.hasTranscript ? "transcript" : null,
             status.capabilities.hasVisuals ? "visuals" : null,
             status.capabilities.hasSegments ? "segments" : null,
             status.capabilities.hasSemanticSearch ? "semantic search" : null
         ].filter((value): value is string => value !== null);
-        this.tutorStatus.title = readyCapabilities.length > 0
+        const readiness = readyCapabilities.length > 0
             ? `Ready: ${readyCapabilities.join(", ")}`
             : "No evidence stage is ready yet";
+        const timings = status.stages.flatMap((stage) =>
+        {
+            return stage.durationMilliseconds === undefined
+                ? []
+                : [`${stage.stage}: ${(stage.durationMilliseconds / 1000).toFixed(1)}s (${stage.status})`];
+        });
+
+        if (status.acquisitionDurationMilliseconds !== undefined)
+        {
+            timings.unshift(`download: ${(status.acquisitionDurationMilliseconds / 1000).toFixed(1)}s`);
+        }
+
+        this.tutorStatus.title = [readiness, ...timings].join("\n");
     }
 
     addMessage(role: messageRole, text: string, timestampSeconds?: number): void

@@ -230,16 +230,23 @@
     }
   }
   async function askTutor(tabId, request) {
-    const recording = await recordingStore.getForTab(tabId, request.question.lectureId);
+    const registration = await prepareTutor(tabId, {
+      kind: "prepareTutor",
+      lectureId: request.question.lectureId,
+      lectureTitle: request.lectureTitle
+    });
+    return registration.ok ? tutorApiClient.ask(request.question) : registration;
+  }
+  async function prepareTutor(tabId, request) {
+    const recording = await recordingStore.getForTab(tabId, request.lectureId);
     if (recording === null || isRecordingExpired(recording)) {
       return createRecordingError(recording);
     }
-    const registration = await tutorApiClient.registerLecture(
-      request.question.lectureId,
+    return tutorApiClient.registerLecture(
+      request.lectureId,
       request.lectureTitle,
       recording.url
     );
-    return registration.ok ? tutorApiClient.ask(request.question) : registration;
   }
   async function handleContentRequest(request, sender) {
     const tabId = sender.tab?.id;
@@ -255,6 +262,9 @@
       }
       case "askTutor": {
         return askTutor(tabId, request);
+      }
+      case "prepareTutor": {
+        return prepareTutor(tabId, request);
       }
       case "getTutorStatus": {
         return tutorApiClient.getStatus(request.lectureId);

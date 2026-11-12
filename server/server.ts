@@ -57,7 +57,7 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
 
         if (status === null)
         {
-            throw new TutorServiceError("evidenceUnavailable", "Ask your first question to prepare this lecture.");
+            throw new TutorServiceError("evidenceUnavailable", "Waiting for the recording page to prepare this lecture.");
         }
 
         writeJson(response, 200, status);

@@ -46,6 +46,11 @@ export type contentRequest =
         lectureTitle: string;
     }
     | {
+        kind: "prepareTutor";
+        lectureId: string;
+        lectureTitle: string;
+    }
+    | {
         kind: "askTutor";
         question: TutorQuestion;
         lectureTitle: string;

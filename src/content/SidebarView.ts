@@ -99,24 +99,8 @@ const sidebarMarkup = `
             outline-offset: -3px;
         }
 
-        .panel[hidden],
-        .launcher[hidden] {
+        .panel[hidden] {
             display: none;
-        }
-
-        .launcher {
-            position: fixed;
-            right: 18px;
-            bottom: 18px;
-            z-index: 2147483647;
-            padding: 11px 16px;
-            color: #ffffff;
-            background: #7c2d3f;
-            border: 0;
-            border-radius: 999px;
-            box-shadow: 0 10px 30px rgba(15, 23, 42, 0.28);
-            cursor: pointer;
-            font-weight: 700;
         }
 
         .header {
@@ -203,22 +187,6 @@ const sidebarMarkup = `
 
         .tutor-status[data-status="failed"] {
             color: #a33c37;
-        }
-
-        .lecture-id {
-            min-width: 0;
-            max-width: 100%;
-            padding: 0;
-            overflow: hidden;
-            color: #68748a;
-            background: transparent;
-            border: 0;
-            cursor: copy;
-            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-            font-size: 10px;
-            text-align: left;
-            text-overflow: ellipsis;
-            white-space: nowrap;
         }
 
         .download {
@@ -379,7 +347,6 @@ const sidebarMarkup = `
             font-size: 11px;
         }
     </style>
-    <button class="launcher" type="button" aria-label="Open lecture tutor" hidden>Tutor</button>
     <aside class="panel" aria-label="Lecture tutor">
         <button
             class="resize-handle"
@@ -406,16 +373,6 @@ const sidebarMarkup = `
             </div>
             <div class="context-row">
                 <span class="tutor-status">Checking lecture evidence…</span>
-            </div>
-            <div class="context-row">
-                <input
-                    class="lecture-id"
-                    type="text"
-                    value="Lecture ID pending"
-                    aria-label="Stable lecture ID"
-                    title="Select and copy the stable lecture ID"
-                    readonly
-                >
             </div>
         </section>
         <div class="messages" role="log" aria-live="polite"></div>
@@ -488,12 +445,10 @@ export class SidebarView
     private readonly host: HTMLElement;
     private readonly panel: HTMLElement;
     private readonly resizeHandle: HTMLButtonElement;
-    private readonly launcher: HTMLButtonElement;
     private readonly lectureTitle: HTMLElement;
     private readonly time: HTMLElement;
     private readonly mediaStatus: HTMLElement;
     private readonly tutorStatus: HTMLElement;
-    private readonly lectureId: HTMLInputElement;
     private readonly downloadButton: HTMLButtonElement;
     private readonly messages: HTMLElement;
     private readonly form: HTMLFormElement;
@@ -516,12 +471,10 @@ export class SidebarView
         shadowRoot.innerHTML = sidebarMarkup;
         this.panel = requireElement(shadowRoot, ".panel");
         this.resizeHandle = requireElement(shadowRoot, ".resize-handle");
-        this.launcher = requireElement(shadowRoot, ".launcher");
         this.lectureTitle = requireElement(shadowRoot, ".lecture-title");
         this.time = requireElement(shadowRoot, ".time");
         this.mediaStatus = requireElement(shadowRoot, ".media-status");
         this.tutorStatus = requireElement(shadowRoot, ".tutor-status");
-        this.lectureId = requireElement(shadowRoot, ".lecture-id");
         this.downloadButton = requireElement(shadowRoot, ".download");
         this.messages = requireElement(shadowRoot, ".messages");
         this.form = requireElement(shadowRoot, ".composer");
@@ -532,34 +485,9 @@ export class SidebarView
         {
             this.setOpen(false);
         });
-        this.launcher.addEventListener("click", () =>
-        {
-            this.setOpen(true);
-        });
         this.downloadButton.addEventListener("click", () =>
         {
             this.callbacks.onDownload();
-        });
-        this.lectureId.addEventListener("click", () =>
-        {
-            const lectureId = this.lectureId.value;
-            this.lectureId.select();
-
-            if (this.lectureId.dataset.isAvailable === "true" && navigator.clipboard !== undefined)
-            {
-                void navigator.clipboard.writeText(lectureId).then(() =>
-                {
-                    this.lectureId.value = "Lecture ID copied";
-                    window.setTimeout(() =>
-                    {
-                        this.lectureId.value = lectureId;
-                        this.lectureId.select();
-                    }, 1_200);
-                }).catch(() =>
-                {
-                    this.lectureId.title = "Clipboard permission was denied";
-                });
-            }
         });
         this.form.addEventListener("submit", (event) =>
         {
@@ -637,21 +565,6 @@ export class SidebarView
 
     setLectureState(state: LectureState): void
     {
-        const lectureId = state.lectureId ?? "Lecture ID unavailable";
-        this.lectureId.value = lectureId;
-        this.lectureId.title = state.lectureId === null
-            ? "A stable lecture ID has not been detected"
-            : "Copy the stable lecture ID";
-
-        if (state.lectureId === null)
-        {
-            delete this.lectureId.dataset.isAvailable;
-        }
-        else
-        {
-            this.lectureId.dataset.isAvailable = "true";
-        }
-
         this.downloadButton.disabled = state.recordingStatus !== "ready";
 
         if (state.recordingStatus === "ready")
@@ -761,20 +674,6 @@ export class SidebarView
     {
         this.updateTutorAnswer(message, answer.answer);
 
-        for (const citation of answer.citations)
-        {
-            const timestamp = document.createElement("button");
-            timestamp.type = "button";
-            timestamp.className = "timestamp";
-            timestamp.textContent = `Jump to ${formatTime(citation.startSeconds)}`;
-            timestamp.title = `Evidence: ${citation.evidenceIds.join(", ")}`;
-            timestamp.addEventListener("click", () =>
-            {
-                this.callbacks.onSeek(citation.startSeconds);
-            });
-            message.append(timestamp);
-        }
-
         if (answer.limitations.length > 0)
         {
             const limitations = document.createElement("p");
@@ -798,7 +697,6 @@ export class SidebarView
     {
         this.isOpen = isOpen;
         this.panel.hidden = !isOpen;
-        this.launcher.hidden = isOpen;
         this.updatePageLayout();
 
         if (isOpen)

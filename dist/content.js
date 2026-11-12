@@ -34450,24 +34450,8 @@
             outline-offset: -3px;
         }
 
-        .panel[hidden],
-        .launcher[hidden] {
+        .panel[hidden] {
             display: none;
-        }
-
-        .launcher {
-            position: fixed;
-            right: 18px;
-            bottom: 18px;
-            z-index: 2147483647;
-            padding: 11px 16px;
-            color: #ffffff;
-            background: #7c2d3f;
-            border: 0;
-            border-radius: 999px;
-            box-shadow: 0 10px 30px rgba(15, 23, 42, 0.28);
-            cursor: pointer;
-            font-weight: 700;
         }
 
         .header {
@@ -34554,22 +34538,6 @@
 
         .tutor-status[data-status="failed"] {
             color: #a33c37;
-        }
-
-        .lecture-id {
-            min-width: 0;
-            max-width: 100%;
-            padding: 0;
-            overflow: hidden;
-            color: #68748a;
-            background: transparent;
-            border: 0;
-            cursor: copy;
-            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-            font-size: 10px;
-            text-align: left;
-            text-overflow: ellipsis;
-            white-space: nowrap;
         }
 
         .download {
@@ -34730,7 +34698,6 @@
             font-size: 11px;
         }
     </style>
-    <button class="launcher" type="button" aria-label="Open lecture tutor" hidden>Tutor</button>
     <aside class="panel" aria-label="Lecture tutor">
         <button
             class="resize-handle"
@@ -34757,16 +34724,6 @@
             </div>
             <div class="context-row">
                 <span class="tutor-status">Checking lecture evidence\u2026</span>
-            </div>
-            <div class="context-row">
-                <input
-                    class="lecture-id"
-                    type="text"
-                    value="Lecture ID pending"
-                    aria-label="Stable lecture ID"
-                    title="Select and copy the stable lecture ID"
-                    readonly
-                >
             </div>
         </section>
         <div class="messages" role="log" aria-live="polite"></div>
@@ -34823,12 +34780,10 @@
     host;
     panel;
     resizeHandle;
-    launcher;
     lectureTitle;
     time;
     mediaStatus;
     tutorStatus;
-    lectureId;
     downloadButton;
     messages;
     form;
@@ -34848,12 +34803,10 @@
       shadowRoot.innerHTML = sidebarMarkup;
       this.panel = requireElement(shadowRoot, ".panel");
       this.resizeHandle = requireElement(shadowRoot, ".resize-handle");
-      this.launcher = requireElement(shadowRoot, ".launcher");
       this.lectureTitle = requireElement(shadowRoot, ".lecture-title");
       this.time = requireElement(shadowRoot, ".time");
       this.mediaStatus = requireElement(shadowRoot, ".media-status");
       this.tutorStatus = requireElement(shadowRoot, ".tutor-status");
-      this.lectureId = requireElement(shadowRoot, ".lecture-id");
       this.downloadButton = requireElement(shadowRoot, ".download");
       this.messages = requireElement(shadowRoot, ".messages");
       this.form = requireElement(shadowRoot, ".composer");
@@ -34862,26 +34815,8 @@
       requireElement(shadowRoot, ".close").addEventListener("click", () => {
         this.setOpen(false);
       });
-      this.launcher.addEventListener("click", () => {
-        this.setOpen(true);
-      });
       this.downloadButton.addEventListener("click", () => {
         this.callbacks.onDownload();
-      });
-      this.lectureId.addEventListener("click", () => {
-        const lectureId = this.lectureId.value;
-        this.lectureId.select();
-        if (this.lectureId.dataset.isAvailable === "true" && navigator.clipboard !== void 0) {
-          void navigator.clipboard.writeText(lectureId).then(() => {
-            this.lectureId.value = "Lecture ID copied";
-            window.setTimeout(() => {
-              this.lectureId.value = lectureId;
-              this.lectureId.select();
-            }, 1200);
-          }).catch(() => {
-            this.lectureId.title = "Clipboard permission was denied";
-          });
-        }
       });
       this.form.addEventListener("submit", (event) => {
         event.preventDefault();
@@ -34939,14 +34874,6 @@
       this.time.title = playback.isPaused ? "Lecture paused" : "Lecture playing";
     }
     setLectureState(state) {
-      const lectureId = state.lectureId ?? "Lecture ID unavailable";
-      this.lectureId.value = lectureId;
-      this.lectureId.title = state.lectureId === null ? "A stable lecture ID has not been detected" : "Copy the stable lecture ID";
-      if (state.lectureId === null) {
-        delete this.lectureId.dataset.isAvailable;
-      } else {
-        this.lectureId.dataset.isAvailable = "true";
-      }
       this.downloadButton.disabled = state.recordingStatus !== "ready";
       if (state.recordingStatus === "ready") {
         this.mediaStatus.textContent = "Recording ready";
@@ -35018,17 +34945,6 @@
     }
     finishTutorAnswer(message, answer) {
       this.updateTutorAnswer(message, answer.answer);
-      for (const citation of answer.citations) {
-        const timestamp = document.createElement("button");
-        timestamp.type = "button";
-        timestamp.className = "timestamp";
-        timestamp.textContent = `Jump to ${formatTime(citation.startSeconds)}`;
-        timestamp.title = `Evidence: ${citation.evidenceIds.join(", ")}`;
-        timestamp.addEventListener("click", () => {
-          this.callbacks.onSeek(citation.startSeconds);
-        });
-        message.append(timestamp);
-      }
       if (answer.limitations.length > 0) {
         const limitations = document.createElement("p");
         limitations.className = "limitations";
@@ -35046,7 +34962,6 @@
     setOpen(isOpen) {
       this.isOpen = isOpen;
       this.panel.hidden = !isOpen;
-      this.launcher.hidden = isOpen;
       this.updatePageLayout();
       if (isOpen) {
         this.textarea.focus();
@@ -35152,6 +35067,7 @@
       });
     }
     start() {
+      this.installStyles();
       this.attach();
       this.observer.observe(document.documentElement, {
         childList: true,
@@ -35162,44 +35078,87 @@
       this.canDownload = canDownload;
       this.updateDownloadButton();
     }
+    installStyles() {
+      if (document.getElementById("blackboard-tutor-toolbar-styles") !== null) {
+        return;
+      }
+      const style = document.createElement("style");
+      style.id = "blackboard-tutor-toolbar-styles";
+      style.textContent = `
+            [data-blackboard-tutor-action] button {
+                border-radius: 4px;
+            }
+
+            [data-blackboard-tutor-action] button:not(:disabled):hover {
+                background-color: #4c4c50 !important;
+            }
+
+            [data-blackboard-tutor-action] button:focus-visible {
+                outline: 2px solid #dedede;
+                outline-offset: -2px;
+            }
+        `;
+      (document.head ?? document.documentElement).append(style);
+    }
     attach() {
       const toolbar = document.querySelector(toolbarSelector);
       if (toolbar === null) {
         return;
       }
-      this.attachButton(toolbar, "download", "Download", () => {
-        this.callbacks.onDownload();
-      });
-      this.attachButton(toolbar, "tutor", "Tutor", () => {
-        this.callbacks.onToggleTutor();
-      });
+      let group = toolbar.querySelector("[data-blackboard-tutor-group]");
+      if (group === null) {
+        group = document.createElement("div");
+        group.setAttribute("data-blackboard-tutor-group", "");
+        group.style.cssText = "display: inline-flex; align-items: center; flex: 0 0 auto;";
+        this.attachButton(group, "download", "Download", () => {
+          this.callbacks.onDownload();
+        });
+        this.attachButton(group, "tutor", "Tutor", () => {
+          this.callbacks.onToggleTutor();
+        });
+        toolbar.insertBefore(group, toolbar.querySelector("#gap-item"));
+      }
       this.updateDownloadButton();
     }
-    attachButton(toolbar, action, label, listener) {
-      if (toolbar.querySelector(`[${itemAttribute}="${action}"]`) !== null) {
-        return;
-      }
+    attachButton(group, action, label, listener) {
       const item = document.createElement("div");
-      item.className = "ClassActionBarItem-root";
       item.setAttribute(itemAttribute, action);
       const button = document.createElement("button");
       button.type = "button";
-      button.textContent = label;
-      button.setAttribute("aria-label", action === "download" ? "Download lecture recording" : "Toggle lecture tutor");
       button.style.cssText = [
-        "padding: 12px",
+        "display: flex",
+        "flex-direction: column",
+        "align-items: center",
+        "justify-content: center",
+        "gap: 6px",
+        "padding: 10px 16px 6px",
         "background: transparent",
-        "color: inherit",
+        "color: #dedede",
         "border: 0",
-        "cursor: pointer",
-        "font: inherit"
+        "font: inherit",
+        "font-size: 14px",
+        "line-height: 1.2",
+        "white-space: nowrap",
+        "cursor: pointer"
       ].join(";");
+      const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      icon.setAttribute("viewBox", "0 0 24 24");
+      icon.setAttribute("width", "24");
+      icon.setAttribute("height", "24");
+      icon.setAttribute("fill", "currentColor");
+      icon.setAttribute("aria-hidden", "true");
+      const path2 = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path2.setAttribute("d", action === "download" ? "M5 20h14v-2H5v2zm7-3 5-5-1.41-1.41L13 13.17V3h-2v10.17l-2.59-2.58L7 12l5 5z" : "M12 3 1 9l11 6 9-4.91V17h2V9L12 3zm-6 9.73V17l6 3.27L18 17v-4.27l-6 3.27-6-3.27z");
+      icon.append(path2);
+      const text3 = document.createElement("span");
+      text3.textContent = label;
+      button.append(icon, text3);
+      button.setAttribute("aria-label", action === "download" ? "Download lecture recording" : "Toggle lecture tutor");
       button.addEventListener("click", () => {
         listener();
       });
       item.append(button);
-      const spacer = toolbar.querySelector("#gap-item");
-      toolbar.insertBefore(item, spacer);
+      group.append(item);
     }
     updateDownloadButton() {
       const item = document.querySelector(`[${itemAttribute}="download"]`);

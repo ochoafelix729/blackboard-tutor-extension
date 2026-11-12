@@ -1,7 +1,7 @@
 // Runs the loopback API for the local extension and its single ingestion pipeline.
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import type { TutorQuestion } from "../src/shared/tutor";
+import type { TutorQuestion, tutorStreamEvent } from "../src/shared/tutor";
 import { AutoRegistrationService, type AutoRegistrationRequest } from "./AutoRegistrationService";
 import { loadServerConfig } from "./config";
 import { EvidenceRepository } from "./EvidenceRepository";
@@ -65,6 +65,47 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
     else if (request.method === "POST" && url.pathname === "/v1/lectures/auto-register")
     {
         writeJson(response, 202, await registration.begin(await readJson<AutoRegistrationRequest>(request)));
+    }
+    else if (request.method === "POST" && url.pathname === "/v1/questions/stream")
+    {
+        const question = await readJson<TutorQuestion>(request);
+        const abortController = new AbortController();
+        response.on("close", () =>
+        {
+            if (!response.writableEnded)
+            {
+                abortController.abort();
+            }
+        });
+        response.writeHead(200, { "Content-Type": "application/x-ndjson", "Cache-Control": "no-store" });
+        response.flushHeaders();
+        const sendEvent = (event: tutorStreamEvent): void =>
+        {
+            if (!response.destroyed)
+            {
+                response.write(`${JSON.stringify(event)}\n`);
+            }
+        };
+
+        try
+        {
+            const answer = await tutor.answer(question, (text) =>
+            {
+                sendEvent({ kind: "text", text });
+            }, abortController.signal);
+            sendEvent({ kind: "complete", answer });
+        }
+        catch (error)
+        {
+            const failure = error instanceof TutorServiceError
+                ? { code: error.code, message: error.message }
+                : { code: "unexpectedError" as const, message: "The local tutor API encountered an error." };
+            sendEvent({ kind: "error", error: failure });
+        }
+        finally
+        {
+            response.end();
+        }
     }
     else if (request.method === "POST" && url.pathname === "/v1/questions")
     {

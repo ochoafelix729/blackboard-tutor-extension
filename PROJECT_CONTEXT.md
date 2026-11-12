@@ -30,7 +30,7 @@ Do not add automated tests. Use TypeScript checking, builds, and code review for
 - Persist download and stage durations, and log per-portion audio extraction and transcription timings without lecture contents or signed URLs. Display transcript coverage and expose durations in the sidebar status tooltip.
 - Retrieve evidence from the current moment and at most the preceding 10 minutes. Reject full-lecture and distant or ambiguous earlier references, with guidance to download the recording for broader analysis.
 - Include retrieved lecture frames and a current player capture when available. If no visuals are available, allow a transcript-grounded answer with an explicit limitation.
-- Validate model answers and citations before rendering them. Timestamp links seek to the underlying evidence.
+- Validate model answers and citations before rendering the answer. User question timestamp links seek to the corresponding playback position.
 
 The implementation remains a functional draft. Improving local reliability, retrieval quality, and mathematical explanations is the next priority.
 
@@ -87,7 +87,7 @@ Preserve original playback times in every artifact. Store evidence and source po
 5. Include representative frames and the current capture without a separate strategy setting.
 6. Ask the configured tutor model for a structured answer with source evidence IDs.
 7. Remove citations to unknown evidence and derive timestamp ranges from actual retrieved evidence.
-8. Render the answer, timestamp links, and any evidence limitations.
+8. Stream answer text to the sidebar as it is generated. Validate the completed answer and citations before displaying evidence limitations; report interrupted streams.
 
 Treat transcript, image, page, and model content as untrusted data. The model must ground lecture-specific claims in supplied evidence and acknowledge gaps. Missing frames must be disclosed rather than silently presented as visual understanding.
 
@@ -109,6 +109,7 @@ Endpoints:
 - `POST /v1/lectures/auto-register`: start or reuse local lecture acquisition.
 - `GET /v1/lectures/status?lectureId=...`: stage readiness and capabilities.
 - `POST /v1/questions`: retrieve evidence and answer a timestamped question.
+- `POST /v1/questions/stream`: stream answer updates and the validated final answer as newline-delimited JSON.
 
 Commands:
 

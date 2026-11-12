@@ -1,6 +1,8 @@
 // Calls OpenAI for transcript-and-visual answers, embeddings, and audio transcription.
 
+import { createParser } from "eventsource-parser";
 import { isTutorAnswer, type TutorAnswer } from "../src/shared/tutor";
+import { getStreamedAnswerText } from "./streamedAnswerText";
 
 export interface ModelImage
 {
@@ -62,39 +64,6 @@ function isRecord(value: unknown): value is Record<string, unknown>
     return typeof value === "object" && value !== null;
 }
 
-function getResponseText(response: Record<string, unknown>): string | null
-{
-    if (typeof response.output_text === "string")
-    {
-        return response.output_text;
-    }
-
-    if (!Array.isArray(response.output))
-    {
-        return null;
-    }
-
-    for (const outputItem of response.output)
-    {
-        if (!isRecord(outputItem) || !Array.isArray(outputItem.content))
-        {
-            continue;
-        }
-
-        for (const contentItem of outputItem.content)
-        {
-            if (isRecord(contentItem)
-                && contentItem.type === "output_text"
-                && typeof contentItem.text === "string")
-            {
-                return contentItem.text;
-            }
-        }
-    }
-
-    return null;
-}
-
 const answerSchema = {
     type: "object",
     additionalProperties: false,
@@ -135,7 +104,7 @@ export class OpenAiProvider
         this.baseUrl = options.baseUrl;
     }
 
-    async generate(request: ModelRequest): Promise<TutorAnswer>
+    async generate(request: ModelRequest, onText: (text: string) => void, signal?: AbortSignal): Promise<TutorAnswer>
     {
         if (this.apiKey.length === 0)
         {
@@ -171,6 +140,7 @@ export class OpenAiProvider
             body: JSON.stringify({
                 model: request.model,
                 store: false,
+                stream: true,
                 instructions: request.systemPrompt,
                 input: [
                     {
@@ -192,12 +162,12 @@ export class OpenAiProvider
                     }
                 }
             }),
-            signal: AbortSignal.timeout(90_000)
+            signal: signal === undefined ? AbortSignal.timeout(90_000) : AbortSignal.any([signal, AbortSignal.timeout(90_000)])
         });
-        const responseValue: unknown = await response.json();
 
         if (!response.ok)
         {
+            const responseValue: unknown = await response.json();
             const errorMessage = isRecord(responseValue)
                 && isRecord(responseValue.error)
                 && typeof responseValue.error.message === "string"
@@ -206,16 +176,69 @@ export class OpenAiProvider
             throw new Error(errorMessage);
         }
 
-        if (!isRecord(responseValue))
+        if (response.body === null)
         {
-            throw new Error("OpenAI returned an invalid response body.");
+            throw new Error("OpenAI returned no tutor response stream.");
         }
 
-        const outputText = getResponseText(responseValue);
+        let outputText = "";
+        let previousText = "";
+        let completed = false;
+        let streamFailed = false;
+        const parser = createParser({
+            onEvent: (event) =>
+            {
+                if (event.data === "[DONE]")
+                {
+                    return;
+                }
 
-        if (outputText === null)
+                const value: unknown = JSON.parse(event.data);
+
+                if (!isRecord(value))
+                {
+                    throw new Error("OpenAI returned an invalid stream event.");
+                }
+
+                if (value.type === "response.output_text.delta" && typeof value.delta === "string")
+                {
+                    outputText += value.delta;
+                    const text = getStreamedAnswerText(outputText);
+
+                    if (text !== null && text !== previousText)
+                    {
+                        previousText = text;
+                        onText(text);
+                    }
+                }
+                else if (value.type === "response.completed")
+                {
+                    completed = true;
+                }
+                else if (value.type === "response.failed" || value.type === "response.incomplete" || value.type === "error")
+                {
+                    streamFailed = true;
+                }
+            }
+        });
+        const decoder = new TextDecoder();
+
+        const reader = response.body.getReader();
+
+        while (true)
         {
-            throw new Error("OpenAI returned no structured tutor answer.");
+            const chunk = await reader.read();
+            parser.feed(decoder.decode(chunk.value, { stream: !chunk.done }));
+
+            if (chunk.done)
+            {
+                break;
+            }
+        }
+
+        if (!completed || streamFailed)
+        {
+            throw new Error("OpenAI did not complete the tutor response.");
         }
 
         let parsedAnswer: unknown;

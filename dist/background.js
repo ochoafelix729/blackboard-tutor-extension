@@ -121,8 +121,51 @@
       const query = new URLSearchParams({ lectureId });
       return this.request(`/v1/lectures/status?${query.toString()}`);
     }
-    ask(question) {
-      return this.request("/v1/questions", question);
+    async streamAnswer(question, onEvent, signal) {
+      try {
+        const response = await fetch(`${tutorApiBaseUrl}/v1/questions/stream`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(question),
+          signal: AbortSignal.any([signal, AbortSignal.timeout(1e5)])
+        });
+        if (!response.ok || response.body === null) {
+          throw new Error("The local tutor did not start streaming.");
+        }
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let pending = "";
+        let finished = false;
+        while (true) {
+          const chunk = await reader.read();
+          pending += decoder.decode(chunk.value, { stream: !chunk.done });
+          const lines = pending.split("\n");
+          pending = lines.pop() ?? "";
+          for (const line of lines) {
+            if (line.length > 0) {
+              const event = JSON.parse(line);
+              onEvent(event);
+              finished ||= event.kind === "complete" || event.kind === "error";
+            }
+          }
+          if (chunk.done) {
+            break;
+          }
+        }
+        if (!finished) {
+          throw new Error("The tutor response stream ended early.");
+        }
+      } catch {
+        if (!signal.aborted) {
+          onEvent({
+            kind: "error",
+            error: {
+              code: "tutorUnavailable",
+              message: "The tutor response was interrupted. Check that the local API is running, then try again."
+            }
+          });
+        }
+      }
     }
     async request(endpoint, body) {
       try {
@@ -229,14 +272,6 @@
       return createErrorResponse("downloadFailed", "Chrome could not start the download. Reload the recording and try again.");
     }
   }
-  async function askTutor(tabId, request) {
-    const registration = await prepareTutor(tabId, {
-      kind: "prepareTutor",
-      lectureId: request.question.lectureId,
-      lectureTitle: request.lectureTitle
-    });
-    return registration.ok ? tutorApiClient.ask(request.question) : registration;
-  }
   async function prepareTutor(tabId, request) {
     const recording = await recordingStore.getForTab(tabId, request.lectureId);
     if (recording === null || isRecordingExpired(recording)) {
@@ -260,17 +295,56 @@
       case "startDownload": {
         return startDownload(tabId, request);
       }
-      case "askTutor": {
-        return askTutor(tabId, request);
-      }
       case "prepareTutor": {
         return prepareTutor(tabId, request);
+      }
+      case "askTutor": {
+        return createErrorResponse("invalidRequest", "Tutor questions require a streaming connection.");
       }
       case "getTutorStatus": {
         return tutorApiClient.getStatus(request.lectureId);
       }
     }
   }
+  chrome.runtime.onConnect.addListener((port) => {
+    if (port.name !== "tutorStream") {
+      return;
+    }
+    const abortController = new AbortController();
+    port.onDisconnect.addListener(() => {
+      abortController.abort();
+    });
+    port.onMessage.addListener((request) => {
+      void (async () => {
+        const tabId = port.sender?.tab?.id;
+        if (tabId === void 0) {
+          port.postMessage({ kind: "error", error: { code: "invalidRequest", message: "The request is not associated with a browser tab." } });
+          return;
+        }
+        const registration = await prepareTutor(tabId, {
+          kind: "prepareTutor",
+          lectureId: request.question.lectureId,
+          lectureTitle: request.lectureTitle
+        });
+        if (abortController.signal.aborted) {
+          return;
+        }
+        if (!registration.ok) {
+          port.postMessage({ kind: "error", error: registration.error });
+          return;
+        }
+        await tutorApiClient.streamAnswer(request.question, (event) => {
+          if (!abortController.signal.aborted) {
+            port.postMessage(event);
+          }
+        }, abortController.signal);
+      })().catch(() => {
+        if (!abortController.signal.aborted) {
+          port.postMessage({ kind: "error", error: { code: "unexpectedError", message: "The extension could not complete the request." } });
+        }
+      });
+    });
+  });
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     void handleContentRequest(message, sender).then(sendResponse).catch(() => {
       sendResponse(createErrorResponse("unexpectedError", "The extension could not complete the request."));
